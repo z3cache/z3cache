@@ -101,6 +101,8 @@ pub struct Cleaned {
     pub removed: u64,
     /// Old enough to remove, but held by a session.
     pub held: u64,
+    /// Old enough to remove, but could not be opened or locked to check.
+    pub failed: u64,
 }
 
 /// Removes lock files last modified more than `older_than` ago that no
@@ -128,20 +130,29 @@ pub fn clean(cache_dir: &Path, older_than: Duration) -> Cleaned {
             if !old {
                 continue;
             }
-            let Ok(file) = OpenOptions::new().write(true).open(&path) else {
-                continue;
-            };
-            if file.try_lock().is_err() {
-                c.held += 1;
-                continue;
+            match lock_existing(&path) {
+                Ok(_file) => {
+                    if fs::remove_file(&path).is_ok() {
+                        c.removed += 1;
+                    }
+                    // Dropping `_file` releases the lock on the removed file.
+                }
+                Err(TryLockError::WouldBlock) => c.held += 1,
+                Err(TryLockError::Error(e)) => {
+                    log!("cannot check lock file {}: {e}", path.display());
+                    c.failed += 1;
+                }
             }
-            if fs::remove_file(&path).is_ok() {
-                c.removed += 1;
-            }
-            // Dropping `file` releases the lock on the removed file.
         }
     }
     c
+}
+
+/// Opens an existing lock file and takes its lock without waiting.
+fn lock_existing(path: &Path) -> Result<File, TryLockError> {
+    let file = OpenOptions::new().write(true).open(path).map_err(TryLockError::Error)?;
+    file.try_lock()?;
+    Ok(file)
 }
 
 /// Takes `<dir>/locks/gc` without waiting, so that only one `gc` runs at a
@@ -228,10 +239,22 @@ mod tests {
         assert_eq!(clean(&dir, Duration::from_secs(3600)), Cleaned::default());
         // Everything is old: the unheld file goes, the held one stays.
         let c = clean(&dir, Duration::ZERO);
-        assert_eq!(c, Cleaned { removed: 1, held: 1 });
+        assert_eq!(c, Cleaned { removed: 1, held: 1, failed: 0 });
         assert!(key_path(&dir, &[1; 32]).exists());
         assert!(!key_path(&dir, &[2; 32]).exists());
         drop(held);
+    }
+
+    #[test]
+    fn clean_counts_files_it_cannot_check_apart_from_held_ones() {
+        let dir = temp("clean-failed");
+        drop(lock(&dir, &[1; 32]));
+        // A lock file that cannot be opened is not held by anyone.
+        let dangling = key_path(&dir, &[2; 32]);
+        fs::create_dir_all(dangling.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(dir.join("missing"), &dangling).unwrap();
+        let c = clean(&dir, Duration::ZERO);
+        assert_eq!(c, Cleaned { removed: 1, held: 0, failed: 1 });
     }
 
     #[test]

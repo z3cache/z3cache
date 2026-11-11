@@ -335,8 +335,12 @@ fn gc() -> i32 {
         }
     };
     let c = lock::clean(dir, LOCK_MAX_AGE);
+    let failed = match c.failed {
+        0 => String::new(),
+        n => format!("; {n} could not be checked"),
+    };
     println!(
-        "locks    removed {} lock files unused for an hour; {} old ones are held",
+        "locks    removed {} lock files unused for an hour; {} old ones are held{failed}",
         c.removed, c.held
     );
     let counters = [("gc_deleted".to_string(), u64_to_sql(deleted))];

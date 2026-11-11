@@ -258,8 +258,10 @@ the solver reports an error.
   makes each answer independent of earlier queries at the cost of reloading
   the context per miss.
 
-**Errors and exit status.** Only solver responses to commands other than
-`echo` are checked for `(error` lines; `echo` text is data. Z3 exits 1 after
+**Errors and exit status.** Solver responses are checked for `(error` lines,
+except the output of `echo` (and, in framed bypass, of `get-info :version`),
+which is data. A raw bypass is not checked; the solver's exit status reports
+its errors. Z3 exits 1 after
 reporting an error, so a session that passed on an error exits 1 even if its
 last solver exits 0. Otherwise the session exits with its last solver's
 status, or 0 if none was started.
@@ -341,7 +343,9 @@ Behaviour:
   (default 100) finds the store over the cap at exit. Only one `gc` runs at a
   time.
 - **Failure:** if the store is locked, corrupt or unwritable, the session
-  continues with it disabled: lookups miss and nothing is written.
+  continues with it disabled: lookups miss and nothing is written. Failing to
+  record a solver's identity or version is only logged; it is a memo, and the
+  store stays in use.
 - `Z3CACHE_SOLVER_SALT` is mixed into `solver_id` for setups where Z3's
   behaviour depends on something other than its executable, such as a shared
   library.
@@ -469,7 +473,8 @@ was new or only its context had changed. Projections are labelled as such.
 - At end of input the proxy closes the solver's stdin, passes on its remaining
   output, writes its bookkeeping, and exits with the status described in
   section 7.
-- On SIGINT, SIGTERM or SIGHUP the proxy kills the solver and exits.
+- On SIGINT, SIGTERM or SIGHUP the proxy kills every solver it started (the
+  live one and any audit solver) and exits.
 - Solver output is drained by its own thread, so a large replay cannot
   deadlock on full pipes.
 - Client input is read by its own thread through a small bounded queue, so a

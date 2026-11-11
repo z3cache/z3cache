@@ -141,10 +141,10 @@ fn z3_answers_without_a_trailing_newline() {
     assert_eq!(out.text(), "x\n");
 }
 
-/// Review finding 1: with `global-decls`, a definition made inside a frame
-/// survives `pop`. Two sessions that differ only in that definition must not
-/// share an answer. The second session's last query is sat in Z3; a cached
-/// unsat from the first would be a false proof.
+/// With `global-decls`, a definition made inside a frame survives `pop`. Two
+/// sessions that differ only in that definition must not share an answer.
+/// The second session's last query is sat in Z3; a cached unsat from the
+/// first would be a false proof.
 #[test]
 fn global_decls_never_reuse_an_answer() {
     let z3 = require_z3!();
@@ -169,9 +169,9 @@ fn global_decls_never_reuse_an_answer() {
     assert_eq!(direct.text(), "sat\nsat\n");
 }
 
-/// Re-review finding A: options restored inside a popped frame must be back
-/// in the solver before anything that follows the pop, including a cached
-/// query that is re-run and a read that depends on it.
+/// Options restored inside a popped frame must be back in the solver before
+/// anything that follows the pop, including a cached query that is re-run
+/// and a read that depends on it.
 #[test]
 fn options_are_restored_at_pop_before_later_replay() {
     let z3 = require_z3!();
@@ -192,9 +192,9 @@ fn options_are_restored_at_pop_before_later_replay() {
     assert_eq!(proxied.code, direct.code);
 }
 
-/// Re-review finding B: an option that makes Z3 quote `echo` output must not
-/// leave the proxy waiting for its unquoted sentinel. Every case is bounded:
-/// a hang fails the test.
+/// An option that makes Z3 quote `echo` output must not leave the proxy
+/// waiting for its unquoted sentinel. Every case is bounded: a hang fails
+/// the test.
 #[test]
 fn output_format_options_never_hang() {
     let z3 = require_z3!();
@@ -234,9 +234,9 @@ fn output_format_options_never_hang() {
     assert_eq!(proxied.code, direct.code);
 }
 
-/// M2 review finding 4: echo text that looks like an error is data, in a
-/// raw bypass and in a framed one, as well as when answered locally (corpus
-/// file echo_error.smt2).
+/// Echo text that looks like an error is data, in a raw bypass and in a
+/// framed one, as well as when answered locally (corpus file
+/// echo_error.smt2).
 #[test]
 fn error_shaped_echo_keeps_z3s_exit_status() {
     let z3 = require_z3!();

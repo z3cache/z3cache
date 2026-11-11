@@ -33,27 +33,21 @@ fn value_span(line: &[u8]) -> Option<(usize, usize)> {
     (end > start).then_some((start, end))
 }
 
-/// Replaces the `rlimit-count` value in a statistics response.
-pub fn rewrite(lines: &mut [Vec<u8>], value: u64) {
-    for l in lines.iter_mut() {
-        if let Some((start, end)) = value_span(l) {
-            l.splice(start..end, value.to_string().into_bytes());
-        }
-    }
-}
-
-/// Adds `offset` to every `rlimit-count` value in one output line (bypass).
-pub fn shift_line(line: &mut Vec<u8>, offset: u64) {
-    if offset == 0 {
+/// Changes the `rlimit-count` value in the statistics response among
+/// `lines` to `f` of it. The response starts at the first line that opens a
+/// keyword list; lines before it, such as errors reported for earlier
+/// commands, are left alone.
+pub fn edit(lines: &mut [Vec<u8>], f: &dyn Fn(u64) -> u64) {
+    let Some(start) = lines.iter().position(|l| l.starts_with(b"(:")) else {
         return;
-    }
-    if let Some((start, end)) = value_span(line)
-        && let Some(v) = std::str::from_utf8(&line[start..end])
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
+    };
+    for l in &mut lines[start..] {
+        if let Some((start, end)) = value_span(l)
+            && let Some(v) = std::str::from_utf8(&l[start..end]).ok().and_then(|s| s.parse::<u64>().ok())
         {
-            line.splice(start..end, (v + offset).to_string().into_bytes());
+            l.splice(start..end, f(v).to_string().into_bytes());
         }
+    }
 }
 
 /// The statistics response given when no solver is running.
@@ -72,10 +66,10 @@ mod tests {
     const REAL: &str = "(:max-memory   0.19\n :memory       0.19\n :num-allocs   451\n :rlimit-count 1234)\n";
 
     #[test]
-    fn parse_and_rewrite() {
+    fn parse_and_edit() {
         let mut l = lines(REAL);
         assert_eq!(parse(&l), Some(1234));
-        rewrite(&mut l, 99);
+        edit(&mut l, &|_| 99);
         assert_eq!(l.concat(), REAL.replace("1234", "99").into_bytes());
         assert_eq!(parse(&lines("(:rlimit-count 7)\n")), Some(7));
         assert_eq!(parse(&lines("(:rlimit-counts 7)\n")), None);
@@ -89,12 +83,12 @@ mod tests {
     }
 
     #[test]
-    fn shift() {
-        let mut l = b" :rlimit-count 10)\n".to_vec();
-        shift_line(&mut l, 5);
-        assert_eq!(l, b" :rlimit-count 15)\n");
-        let mut other = b"unsat\n".to_vec();
-        shift_line(&mut other, 5);
-        assert_eq!(other, b"unsat\n");
+    fn edit_changes_only_the_statistics_response() {
+        let mut l = lines(":rlimit-count 10\n(:max-memory 0.19\n :rlimit-count 10)\n");
+        edit(&mut l, &|v| v + 5);
+        assert_eq!(l.concat(), b":rlimit-count 10\n(:max-memory 0.19\n :rlimit-count 15)\n");
+        let mut other = lines("unsat\n");
+        edit(&mut other, &|v| v + 5);
+        assert_eq!(other.concat(), b"unsat\n");
     }
 }

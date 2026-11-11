@@ -17,6 +17,12 @@ pub trait SolverProfile: Sync {
     /// `unknown` depend on machine load and are never stored (section 7).
     fn is_wall_clock_option(&self, name: &[u8]) -> bool;
 
+    /// The command that opens one frame.
+    fn push_command(&self) -> &'static [u8];
+
+    /// The command that discards one frame.
+    fn pop_command(&self) -> &'static [u8];
+
     /// Command that makes the solver print `sentinel` on a line of its own.
     fn sentinel_command(&self, sentinel: &str) -> Vec<u8>;
 
@@ -39,11 +45,10 @@ pub trait SolverProfile: Sync {
     /// The resource counter in a statistics response.
     fn parse_rlimit(&self, lines: &[Vec<u8>]) -> Option<u64>;
 
-    /// Replaces the resource counter in a statistics response.
-    fn rewrite_rlimit(&self, lines: &mut [Vec<u8>], value: u64);
-
-    /// Adds `offset` to any resource counter in an output line (bypass).
-    fn shift_rlimit(&self, line: &mut Vec<u8>, offset: u64);
+    /// Changes the resource counter in the statistics response among
+    /// `lines` to `f` of its value. The response may follow other output,
+    /// such as errors for earlier commands, which is left alone.
+    fn edit_rlimit(&self, lines: &mut [Vec<u8>], f: &dyn Fn(u64) -> u64);
 
     /// The statistics response given when no solver is running.
     fn synthesize_statistics(&self, value: u64) -> Vec<u8>;
@@ -111,6 +116,14 @@ impl SolverProfile for Z3 {
         Z3_WALL_CLOCK_OPTIONS.iter().any(|o| o.as_bytes() == name)
     }
 
+    fn push_command(&self) -> &'static [u8] {
+        b"(push)"
+    }
+
+    fn pop_command(&self) -> &'static [u8] {
+        b"(pop)"
+    }
+
     fn sentinel_command(&self, sentinel: &str) -> Vec<u8> {
         format!("(echo \"{sentinel}\")").into_bytes()
     }
@@ -142,12 +155,8 @@ impl SolverProfile for Z3 {
         crate::rlimit::parse(lines)
     }
 
-    fn rewrite_rlimit(&self, lines: &mut [Vec<u8>], value: u64) {
-        crate::rlimit::rewrite(lines, value)
-    }
-
-    fn shift_rlimit(&self, line: &mut Vec<u8>, offset: u64) {
-        crate::rlimit::shift_line(line, offset)
+    fn edit_rlimit(&self, lines: &mut [Vec<u8>], f: &dyn Fn(u64) -> u64) {
+        crate::rlimit::edit(lines, f)
     }
 
     fn synthesize_statistics(&self, value: u64) -> Vec<u8> {

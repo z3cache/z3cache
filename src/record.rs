@@ -89,12 +89,22 @@ fn open(path: &Path) -> Option<BufWriter<File>> {
     }
 }
 
-fn write_or_disable(w: &mut Option<BufWriter<File>>, what: &str, bytes: &[u8]) {
+/// Writes to a transcript file; an error is logged and disables the file.
+pub(crate) fn write_or_disable(w: &mut Option<BufWriter<File>>, what: &str, bytes: &[u8]) {
     if let Some(f) = w
         && let Err(e) = f.write_all(bytes) {
             log!("recording {what} failed: {e}");
             *w = None;
         }
+}
+
+/// Flushes a transcript file, logging an error.
+pub(crate) fn flush_or_log(w: &mut Option<BufWriter<File>>, what: &str) {
+    if let Some(f) = w
+        && let Err(e) = f.flush()
+    {
+        log!("recording {what} failed: {e}");
+    }
 }
 
 impl Recorder {
@@ -139,16 +149,12 @@ impl Recorder {
         write_or_disable(&mut self.input, "input", bytes);
     }
 
-    pub fn output(&mut self, bytes: &[u8]) {
-        write_or_disable(&mut self.output, "output", bytes);
-    }
-
     /// Takes the input transcript, for a thread that reads from the client.
     pub fn take_input(&mut self) -> Option<BufWriter<File>> {
         self.input.take()
     }
 
-    /// Takes the output transcript, for a thread that writes to the client.
+    /// Takes the output transcript, for whatever writes to the client.
     pub fn take_output(&mut self) -> Option<BufWriter<File>> {
         self.output.take()
     }
@@ -198,10 +204,7 @@ impl Recorder {
             (&mut self.output, "output"),
             (&mut self.records, "records"),
         ] {
-            if let Some(f) = w
-                && let Err(e) = f.flush() {
-                    log!("recording {what} failed: {e}");
-                }
+            flush_or_log(w, what);
         }
         self.write_meta();
     }

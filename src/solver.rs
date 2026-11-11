@@ -16,6 +16,8 @@ use std::thread::JoinHandle;
 
 pub struct Solver {
     child: Child,
+    /// The pid is in [`CHILDREN`] until the solver has been waited for.
+    registered: bool,
     stdin: Option<BufWriter<ChildStdin>>,
     lines: Option<Receiver<Vec<u8>>>,
     drain: Option<JoinHandle<()>>,
@@ -38,7 +40,7 @@ impl Solver {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()?;
-        CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
+        let registered = register(child.id() as i32);
         let stdout = child.stdout.take().expect("piped stdout");
         let stdin = child.stdin.take().expect("piped stdin");
         let (tx, rx) = mpsc::channel();
@@ -58,6 +60,7 @@ impl Solver {
         });
         Ok(Solver {
             child,
+            registered,
             stdin: Some(BufWriter::with_capacity(1 << 16, stdin)),
             lines: Some(rx),
             drain: Some(drain),
@@ -101,11 +104,6 @@ impl Solver {
         Response { lines, eof: true }
     }
 
-    /// Makes this solver the process killed on SIGINT, SIGTERM or SIGHUP.
-    pub fn track(&self) {
-        CHILD_PID.store(self.child.id() as i32, Ordering::SeqCst);
-    }
-
     /// True if the solver process has exited.
     pub fn has_exited(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(Some(_)))
@@ -129,11 +127,11 @@ impl Solver {
     }
 
     /// Closes the solver's stdin, collects the rest of its output and waits
-    /// for it to exit. Returns that output and the exit code to pass on.
-    pub fn finish(&mut self) -> (Vec<u8>, i32) {
+    /// for it to exit. Returns those lines and the exit code to pass on.
+    pub fn finish(&mut self) -> (Vec<Vec<u8>>, i32) {
         self.close_stdin();
         let rest = match self.lines.take() {
-            Some(rx) => rx.iter().collect::<Vec<_>>().concat(),
+            Some(rx) => rx.iter().collect(),
             None => Vec::new(),
         };
         (rest, self.wait())
@@ -151,7 +149,9 @@ impl Solver {
                 .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
             Err(_) => 1,
         };
-        CHILD_PID.store(0, Ordering::SeqCst);
+        if std::mem::take(&mut self.registered) {
+            unregister(self.child.id() as i32);
+        }
         code
     }
 }
@@ -176,24 +176,81 @@ pub fn solver_id(executable: &[u8; 32], salt: &[u8]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-static CHILD_PID: AtomicI32 = AtomicI32::new(0);
+/// Pids of the running solvers, killed on SIGINT, SIGTERM or SIGHUP. A
+/// session runs at most two at once (the live solver and an audit's); the
+/// rest is headroom. Atomics in a fixed array, so that the signal handler
+/// can read them.
+static CHILDREN: [AtomicI32; 8] = [const { AtomicI32::new(0) }; 8];
+
+/// Adds a pid to [`CHILDREN`]. Returns false if there was no free slot.
+fn register(pid: i32) -> bool {
+    let free = CHILDREN
+        .iter()
+        .any(|slot| slot.compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst).is_ok());
+    if !free {
+        crate::log!("no slot to track solver {pid}; a signal will not kill it");
+    }
+    free
+}
+
+fn unregister(pid: i32) {
+    for slot in &CHILDREN {
+        let _ = slot.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
+/// Kills every registered solver. Async-signal-safe.
+fn kill_children() {
+    for slot in &CHILDREN {
+        let pid = slot.load(Ordering::SeqCst);
+        if pid > 0 {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
 
 extern "C" fn on_signal(sig: libc::c_int) {
     // Only async-signal-safe calls here.
-    let pid = CHILD_PID.load(Ordering::SeqCst);
+    kill_children();
     unsafe {
-        if pid > 0 {
-            libc::kill(pid, libc::SIGKILL);
-        }
         libc::_exit(128 + sig);
     }
 }
 
-/// On SIGINT, SIGTERM or SIGHUP, kill the solver and exit.
+/// On SIGINT, SIGTERM or SIGHUP, kill every running solver and exit.
 pub fn install_signal_handlers() {
     for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
         unsafe {
             libc::signal(sig, on_signal as *const () as libc::sighandler_t);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registered(pid: u32) -> bool {
+        CHILDREN.iter().any(|slot| slot.load(Ordering::SeqCst) == pid as i32)
+    }
+
+    /// A solver started while another runs (an audit) must not take the
+    /// first one's place as the process a signal kills, during or after.
+    #[test]
+    fn a_signal_kills_every_running_solver() {
+        let spawn = || Solver::spawn(Path::new("/bin/sleep"), &["30".into()]).unwrap();
+        let mut live = spawn();
+        let mut audit = spawn();
+        let (live_pid, audit_pid) = (live.child.id(), audit.child.id());
+        assert!(registered(live_pid) && registered(audit_pid));
+        unsafe { libc::kill(audit_pid as i32, libc::SIGKILL) };
+        assert_eq!(audit.wait(), 128 + libc::SIGKILL);
+        assert!(!registered(audit_pid));
+        assert!(registered(live_pid), "the live solver must stay registered");
+        kill_children();
+        assert_eq!(live.wait(), 128 + libc::SIGKILL);
+        assert!(!registered(live_pid));
     }
 }

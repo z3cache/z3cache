@@ -171,9 +171,9 @@ fn gc_while_sessions_run() {
 
 #[test]
 fn hits_found_after_waiting_for_a_lock_are_audited_too() {
-    // M2 review finding 3: the waiter's stub contradicts the holder's. Same
-    // handshake as above: the holder answers only once the waiter has
-    // logged that it is waiting for the lock.
+    // The waiter's stub contradicts the holder's. Same handshake as above:
+    // the holder answers only once the waiter has logged that it is waiting
+    // for the lock.
     let dir = temp_dir("audit-after-lock");
     let cache = dir.join("cache");
     let log = dir.join("stub.log");

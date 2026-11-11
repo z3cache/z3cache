@@ -318,6 +318,26 @@ fn version_is_answered_locally_once_seen() {
 }
 
 #[test]
+fn failing_to_record_the_version_keeps_the_store_in_use() {
+    // The solver identity is a memo: a failed write of it, here of the
+    // version reply, must not disable lookups and stores.
+    let f = Fixture::new("version-unwritable");
+    f.run(b"(check-sat)\n");
+    {
+        let conn = rusqlite::Connection::open(f.cache.join(FILE_NAME)).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER no_solver_writes BEFORE INSERT ON solver \
+             BEGIN SELECT RAISE(ABORT, 'solver table is read-only'); END;",
+        )
+        .unwrap();
+    }
+    let out = f.run(b"(get-info :version)\n(assert a)\n(check-sat)\n");
+    assert_eq!(out.text(), "(:version \"4.99.0\")\nunsat\n");
+    assert_eq!(f.counter("stores"), 2);
+    assert_eq!(f.counter("sessions"), 2);
+}
+
+#[test]
 fn unusable_store_still_answers_correctly() {
     let dir = temp_dir("badstore");
     let file = dir.join("not-a-dir");
@@ -615,11 +635,11 @@ fn analyze_reports_projected_hits() {
     assert!(new_line.contains(" 1   50.0%"), "{text}");
 }
 
-// Regressions from the M1 review.
+// Bypass, options and read-only modes.
 
 #[test]
 fn options_off_the_allowlist_bypass_and_are_never_cached() {
-    // Finding 1: global-decls changes what pop undoes, so it must bypass.
+    // global-decls changes what pop undoes, so it must bypass.
     let f = Fixture::new("global-decls");
     let input = b"(set-option :global-decls true)\n(push)\n(declare-const p Bool)\n(check-sat)\n(pop)\n(check-sat)\n";
     let direct = run(&stub(), PROXY_ARGS, input, &[]);
@@ -658,8 +678,8 @@ fn parameters_off_the_allowlist_run_the_real_solver_directly() {
 
 #[test]
 fn the_live_solver_gets_options_restored_after_pop() {
-    // Finding 2: the restoring set-option was never sent before the frame
-    // was popped; pop does not undo options in the solver.
+    // pop does not undo options in the solver, so the restoring
+    // set-option must be sent after the frame is popped.
     let f = Fixture::new("rlimit-restore");
     let out = f.run(&corpus("rlimit_restore.smt2"));
     assert_eq!(out.text(), "unsat\nunsat\n");
@@ -680,7 +700,7 @@ fn the_live_solver_gets_options_restored_after_pop() {
 
 #[test]
 fn multiline_errors_during_replay_are_passed_on_whole() {
-    // Finding 3: replay output used to be split line by line.
+    // Replay output is passed on whole, not line by line.
     let input = b"(assert stub-multiline-error)\n(check-sat)\n";
     let out = assert_same(input, &[]);
     assert!(out.text().contains("  detail two\")\n"), "{}", out.text());
@@ -696,8 +716,8 @@ fn multiline_errors_during_replay_are_passed_on_whole() {
 
 #[test]
 fn bypass_shifts_only_statistics_responses() {
-    // Finding 4: an echo that looks like a statistics line must come out
-    // exactly as asked. `pop` below the base frame starts a framed bypass.
+    // An echo that looks like a statistics line must come out exactly as
+    // asked. `pop` below the base frame starts a framed bypass.
     let f = Fixture::new("shift");
     f.run(b"(push)(assert a)(check-sat)(pop)");
     let out = f.run(
@@ -715,7 +735,8 @@ fn bypass_shifts_only_statistics_responses() {
 #[test]
 fn unknown_commands_bypass_raw_and_change_nothing() {
     // A command outside the tables may change output framing, so bypass is
-    // raw: bytes pass unchanged, and rule 7 is not guaranteed (DESIGN 9).
+    // raw: bytes pass unchanged, and rule 7 is not guaranteed (DESIGN
+    // section 8).
     let f = Fixture::new("raw");
     f.run(b"(push)(assert a)(check-sat)(pop)");
     let out = f.run(
@@ -737,7 +758,6 @@ fn sqlite_state(dir: &Path) -> (i64, i64) {
 
 #[test]
 fn read_only_modes_never_create_or_change_the_store() {
-    // Finding 5.
     for mode in ["ro", "enforce"] {
         let f = Fixture::new(&format!("ro-{mode}"));
         let env = [("Z3CACHE_MODE", OsStr::new(mode))];
@@ -761,12 +781,10 @@ fn read_only_modes_never_create_or_change_the_store() {
     }
 }
 
-// Regressions from the M1 re-review.
-
 #[test]
 fn options_are_restored_in_the_solver_at_pop() {
-    // Finding A: the restoring set-option must reach the solver before the
-    // next push, not after it.
+    // The restoring set-option must reach the solver before the next push,
+    // not after it.
     let f = Fixture::new("restore-at-pop");
     f.run(&corpus("rlimit_restore_push.smt2"));
     assert_eq!(
@@ -788,10 +806,9 @@ fn options_are_restored_in_the_solver_at_pop() {
 
 #[test]
 fn read_only_modes_leave_entries_and_schema_alone() {
-    // Finding C, the revised contract: ro and enforce never create the
-    // directory or database and never change entries, counters, schema or
-    // user_version. SQLite may add its -wal/-shm files next to an existing
-    // database.
+    // ro and enforce never create the directory or database and never
+    // change entries, counters, schema or user_version. SQLite may add its
+    // -wal/-shm files next to an existing database.
     for mode in ["ro", "enforce"] {
         let f = Fixture::new(&format!("contract-{mode}"));
         f.run(b"(assert a)\n(check-sat)\n");
@@ -887,8 +904,8 @@ fn solver_death_while_idle(f: &Fixture, input: &[u8]) -> i32 {
 
 #[test]
 fn solver_death_ends_the_session_even_with_stdin_open() {
-    // Finding D. Framed bypass: a hit puts the client's counter ahead of the
-    // solver's, then pop below the base frame.
+    // Framed bypass: a hit puts the client's counter ahead of the solver's,
+    // then pop below the base frame.
     let f = Fixture::new("death-framed");
     f.run(b"(push)(assert a)(check-sat)(pop)");
     let code = solver_death_while_idle(&f, b"(push)(assert a)(check-sat)(pop)(pop)(echo \"ready\")\n");
@@ -1171,12 +1188,10 @@ fn some_sessions_start_eviction_at_exit() {
     assert_eq!(entry_count(&g.cache), 50);
 }
 
-// Regressions from the M2 review.
-
 #[test]
 fn reads_after_a_query_follow_the_answer_actually_given() {
-    // Finding 1: get-model after sat was stored by an `all` session; a later
-    // session whose query is unsat must not get that model.
+    // get-model after sat is stored by an `all` session; a later session
+    // whose query is unsat must not get that model.
     let input = b"(check-sat)\n(get-model)\n";
     let all = ("Z3CACHE_STORE", OsStr::new("all"));
     let unsat_direct = run(&stub(), PROXY_ARGS, input, &[]);
@@ -1198,8 +1213,8 @@ fn reads_after_a_query_follow_the_answer_actually_given() {
 
 #[test]
 fn a_holder_whose_client_stops_reading_does_not_block_waiters() {
-    // Finding 2: replay output larger than a pipe buffer, for a client that
-    // never reads it, must not be written while the lock is held.
+    // Replay output larger than a pipe buffer, for a client that never
+    // reads it, must not be written while the lock is held.
     // Handshake: the holder's stub logs the query only after the replay
     // (whose errors the holder must keep, not write), then holds its answer
     // behind a gate until the waiter has logged that it is waiting.
@@ -1309,7 +1324,7 @@ fn numeric_settings_out_of_range_only_warn() {
 
 #[test]
 fn error_shaped_echo_is_data() {
-    // Finding 4: `(error` at the start of echo output is not a solver error.
+    // `(error` at the start of echo output is not a solver error.
     let echo = b"(echo \"(error \"\"hello\"\")\")\n";
     // Answered locally.
     let out = assert_same(echo, &[]);
