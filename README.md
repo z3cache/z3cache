@@ -104,6 +104,9 @@ Two things to keep in mind:
   merge gates, CI and release builds with `Z3CACHE_MODE=off`. To spot-check
   the cache, `Z3CACHE_VERIFY=0.05` re-checks 5% of hits against Z3.
 
+If you find z3cache giving an answer a real Z3 would not, please report it
+privately as described in [SECURITY.md](SECURITY.md).
+
 ## Configuration
 
 Settings live in `~/.config/z3cache/config.toml` (on macOS too), a
