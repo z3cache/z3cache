@@ -1,0 +1,263 @@
+//! Tier 3: the proxy against a real Z3. Each corpus transcript must give the
+//! same output and exit status through the proxy, cold and then warm, as
+//! through Z3 directly, apart from error positions and statistics. Also
+//! checks the DESIGN section 16 assumptions that a transcript can show.
+//!
+//! Skipped, with a message, when `Z3CACHE_REAL_Z3` is unset and no `z3` is
+//! on `PATH`.
+
+mod common;
+
+use std::ffi::OsStr;
+use std::path::PathBuf;
+
+use common::*;
+
+fn real_z3() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("Z3CACHE_REAL_Z3").filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join("z3"))
+        .find(|p| p.is_file())
+}
+
+macro_rules! require_z3 {
+    () => {
+        match real_z3() {
+            Some(z3) => z3,
+            None => {
+                eprintln!("SKIPPED: no real Z3 (set Z3CACHE_REAL_Z3 or put z3 on PATH)");
+                return;
+            }
+        }
+    };
+}
+
+const ARGS: &[&str] = &["-smt2", "-in"];
+
+/// Makes outputs comparable across the proxy's replay:
+/// - error positions refer to the input as the solver received it, which the
+///   proxy re-sends in canonical form;
+/// - statistics vary from run to run;
+/// - Z3 4.16.0 explains an exceeded resource limit as `canceled` if the
+///   solver has been through a push/pop and as `max. resource limit
+///   exceeded` otherwise, and the replay leaves out popped frames
+///   (DESIGN section 13, solver history). The verdict is the same.
+fn normalize(out: &str) -> String {
+    let mut o = String::new();
+    for line in out.split_inclusive('\n') {
+        if line == "(:reason-unknown \"canceled\")\n"
+            || line == "(:reason-unknown \"max. resource limit exceeded\")\n"
+        {
+            o.push_str("(:reason-unknown <resource limit>)\n");
+            continue;
+        }
+        let is_stats = line.starts_with(" :")
+            || (line.starts_with("(:")
+                && !line.starts_with("(:version")
+                && !line.starts_with("(:reason-unknown"));
+        if is_stats {
+            continue;
+        }
+        match line.strip_prefix("(error \"line ") {
+            Some(rest) => match rest.find(": ") {
+                Some(at) => {
+                    o.push_str("(error \"");
+                    o.push_str(&rest[at + 2..]);
+                }
+                None => o.push_str(line),
+            },
+            None => o.push_str(line),
+        }
+    }
+    o
+}
+
+#[test]
+fn corpus_matches_real_z3_cold_and_warm() {
+    let z3 = require_z3!();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".smt2"))
+        .collect();
+    names.sort();
+    assert!(!names.is_empty());
+    // Each configuration gets its own cache and runs every file cold, then
+    // warm.
+    let configs: [(&str, &[(&str, &str)]); 3] = [
+        ("default", &[]),
+        ("fresh solvers", &[("Z3CACHE_SOLVER", "fresh")]),
+        ("store all", &[("Z3CACHE_STORE", "all")]),
+    ];
+    for name in names {
+        let input = corpus(&name);
+        let direct = run(&z3, ARGS, &input, &[]);
+        for (config, extra) in configs {
+            let cache = temp_dir(&format!("diff-{name}"));
+            let mut env = vec![
+                ("Z3CACHE_REAL_Z3", z3.as_os_str()),
+                ("Z3CACHE_DIR", cache.as_os_str()),
+            ];
+            env.extend(extra.iter().map(|(k, v)| (*k, OsStr::new(v))));
+            for pass in ["cold", "warm"] {
+                let proxied = run(&z3cache(), ARGS, &input, &env);
+                assert_eq!(
+                    normalize(&proxied.text()),
+                    normalize(&direct.text()),
+                    "{name}, {config}, {pass}"
+                );
+                assert_eq!(proxied.code, direct.code, "{name}, {config}, {pass}: exit status");
+            }
+        }
+    }
+}
+
+/// A1: `set-option` is not undone by `pop`.
+#[test]
+fn a1_options_survive_pop() {
+    let z3 = require_z3!();
+    let out = run(&z3, ARGS, &corpus("options_pop.smt2"), &[]);
+    assert!(out.text().starts_with("unknown\n"), "{}", out.text());
+}
+
+/// A2: `echo` prints its string unquoted on one line, `""` unescaped.
+#[test]
+fn a2_echo_is_unquoted() {
+    let z3 = require_z3!();
+    let out = run(&z3, ARGS, b"(echo \"a b\")(echo \"q\"\"q\")(echo \"\")", &[]);
+    assert_eq!(out.text(), "a b\nq\"q\n\n");
+}
+
+/// The proxy's sentinel is appended on the same line as the command, so the
+/// solver must answer a command that has no trailing newline.
+#[test]
+fn z3_answers_without_a_trailing_newline() {
+    let z3 = require_z3!();
+    let out = run(&z3cache(), ARGS, b"(echo \"x\")", &[("Z3CACHE_REAL_Z3", z3.as_os_str())]);
+    assert_eq!(out.text(), "x\n");
+}
+
+/// Review finding 1: with `global-decls`, a definition made inside a frame
+/// survives `pop`. Two sessions that differ only in that definition must not
+/// share an answer. The second session's last query is sat in Z3; a cached
+/// unsat from the first would be a false proof.
+#[test]
+fn global_decls_never_reuse_an_answer() {
+    let z3 = require_z3!();
+    let session = |value: &str| {
+        format!(
+            "(set-option :global-decls true)\n(push)\n(define-fun p () Bool {value})\n\
+             (check-sat)\n(pop)\n(assert p)\n(check-sat)\n"
+        )
+    };
+    let cache = temp_dir("global-decls");
+    let env = [
+        ("Z3CACHE_REAL_Z3", z3.as_os_str()),
+        ("Z3CACHE_DIR", cache.as_os_str()),
+    ];
+    for value in ["false", "true"] {
+        let input = session(value);
+        let direct = run(&z3, ARGS, input.as_bytes(), &[]);
+        let proxied = run(&z3cache(), ARGS, input.as_bytes(), &env);
+        assert_eq!(proxied.text(), direct.text(), "p = {value}");
+    }
+    let direct = run(&z3, ARGS, session("true").as_bytes(), &[]);
+    assert_eq!(direct.text(), "sat\nsat\n");
+}
+
+/// Re-review finding A: options restored inside a popped frame must be back
+/// in the solver before anything that follows the pop, including a cached
+/// query that is re-run and a read that depends on it.
+#[test]
+fn options_are_restored_at_pop_before_later_replay() {
+    let z3 = require_z3!();
+    let cache = temp_dir("restore-warm");
+    let env = [
+        ("Z3CACHE_REAL_Z3", z3.as_os_str()),
+        ("Z3CACHE_DIR", cache.as_os_str()),
+    ];
+    let base = "(set-option :rlimit 0)(declare-const x Int)";
+    let q = "(push)(assert (> x 0))(assert (< x 0))(check-sat)";
+    run(&z3cache(), ARGS, format!("{base}{q}(pop)").as_bytes(), &env);
+    let input = format!(
+        "{base}(push)(set-option :rlimit 1)(check-sat)(set-option :rlimit 0)(pop){q}(get-info :reason-unknown)"
+    );
+    let direct = run(&z3, ARGS, input.as_bytes(), &[]);
+    let proxied = run(&z3cache(), ARGS, input.as_bytes(), &env);
+    assert_eq!(proxied.text(), direct.text());
+    assert_eq!(proxied.code, direct.code);
+}
+
+/// Re-review finding B: an option that makes Z3 quote `echo` output must not
+/// leave the proxy waiting for its unquoted sentinel. Every case is bounded:
+/// a hang fails the test.
+#[test]
+fn output_format_options_never_hang() {
+    let z3 = require_z3!();
+    let limit = std::time::Duration::from_secs(60);
+    let cases = [
+        // At the start, and after another bypass trigger.
+        String::from("(set-option :smtlib2_compliant true)(echo \"ok\")(check-sat)"),
+        String::from("(reset)(set-option :smtlib2_compliant true)(echo \"ok\")"),
+    ];
+    for input in &cases {
+        let direct = run_bounded(&z3, ARGS, input.as_bytes(), &[], limit);
+        let proxied = run_bounded(
+            &z3cache(),
+            ARGS,
+            input.as_bytes(),
+            &[("Z3CACHE_REAL_Z3", z3.as_os_str())],
+            limit,
+        );
+        assert_eq!(normalize(&proxied.text()), normalize(&direct.text()), "{input}");
+        assert_eq!(proxied.code, direct.code, "{input}");
+    }
+    // After a framed bypass (counter ahead of the solver's, pop below the
+    // base frame), the option switches the session to raw.
+    let cache = temp_dir("framed-compliant");
+    let env = [
+        ("Z3CACHE_REAL_Z3", z3.as_os_str()),
+        ("Z3CACHE_DIR", cache.as_os_str()),
+    ];
+    let q = "(declare-const x Int)(push)(assert (> x 0))(assert (< x 0))(check-sat)(pop)";
+    run_bounded(&z3cache(), ARGS, q.as_bytes(), &env, limit);
+    let input = format!(
+        "{q}(get-info :all-statistics)(pop)(set-option :smtlib2_compliant true)(echo \"ok\")(check-sat)"
+    );
+    let direct = run_bounded(&z3, ARGS, input.as_bytes(), &[], limit);
+    let proxied = run_bounded(&z3cache(), ARGS, input.as_bytes(), &env, limit);
+    assert_eq!(normalize(&proxied.text()), normalize(&direct.text()));
+    assert_eq!(proxied.code, direct.code);
+}
+
+/// M2 review finding 4: echo text that looks like an error is data, in a
+/// raw bypass and in a framed one, as well as when answered locally (corpus
+/// file echo_error.smt2).
+#[test]
+fn error_shaped_echo_keeps_z3s_exit_status() {
+    let z3 = require_z3!();
+    let limit = std::time::Duration::from_secs(60);
+    let echo = "(echo \"(error \"\"hello\"\")\")";
+    let raw = format!("(reset){echo}(check-sat)");
+    let direct = run_bounded(&z3, ARGS, raw.as_bytes(), &[], limit);
+    assert_eq!(direct.code, 0);
+    let proxied = run_bounded(&z3cache(), ARGS, raw.as_bytes(), &[("Z3CACHE_REAL_Z3", z3.as_os_str())], limit);
+    assert_eq!((proxied.text(), proxied.code), (direct.text(), direct.code));
+
+    let cache = temp_dir("framed-echo");
+    let env = [
+        ("Z3CACHE_REAL_Z3", z3.as_os_str()),
+        ("Z3CACHE_DIR", cache.as_os_str()),
+    ];
+    let q = "(declare-const x Int)(push)(assert (> x 0))(assert (< x 0))(check-sat)(pop)";
+    run_bounded(&z3cache(), ARGS, q.as_bytes(), &env, limit);
+    let framed = format!("{q}(get-info :all-statistics)(pop){echo}");
+    let direct = run_bounded(&z3, ARGS, framed.as_bytes(), &[], limit);
+    let proxied = run_bounded(&z3cache(), ARGS, framed.as_bytes(), &env, limit);
+    assert_eq!(normalize(&proxied.text()), normalize(&direct.text()));
+    assert_eq!(proxied.code, direct.code);
+}

@@ -1,0 +1,193 @@
+//! Helpers shared by the integration tests.
+#![allow(dead_code)]
+
+use std::ffi::OsStr;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub fn z3cache() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_z3cache"))
+}
+
+/// The scripted stub solver, built from `examples/stub_solver.rs`.
+pub fn stub() -> PathBuf {
+    let p = z3cache().parent().unwrap().join("examples/stub_solver");
+    assert!(
+        p.exists(),
+        "stub solver not built at {}; run plain `cargo test` or `cargo build --examples`",
+        p.display()
+    );
+    p
+}
+
+pub fn corpus(name: &str) -> Vec<u8> {
+    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus").join(name)).unwrap()
+}
+
+pub fn temp_dir(name: &str) -> PathBuf {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "z3cache-test-{}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst),
+        name
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+pub struct Run {
+    pub stdout: Vec<u8>,
+    pub code: i32,
+}
+
+impl Run {
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+}
+
+/// Runs `bin` with `args`, feeding `input` in chunks of `chunk` bytes, with
+/// all `Z3CACHE_*` and `Z3STUB_*` variables cleared and `env` set. Unless
+/// `env` sets `Z3CACHE_DIR`, the run gets a fresh, empty cache.
+pub fn run_chunked(
+    bin: &Path,
+    args: &[&str],
+    input: &[u8],
+    chunk: usize,
+    env: &[(&str, &OsStr)],
+) -> Run {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    for (k, _) in std::env::vars_os() {
+        let k = k.to_string_lossy();
+        if k.starts_with("Z3CACHE_") || k.starts_with("Z3STUB_") {
+            cmd.env_remove(&*k);
+        }
+    }
+    // Never touch the user's cache: a fresh one per run unless given.
+    if !env.iter().any(|(k, _)| *k == "Z3CACHE_DIR") {
+        cmd.env("Z3CACHE_DIR", temp_dir("cache"));
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        for piece in input.chunks(chunk.max(1)) {
+            if stdin.write_all(piece).and_then(|_| stdin.flush()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut stdout = Vec::new();
+    child.stdout.take().unwrap().read_to_end(&mut stdout).unwrap();
+    let status = child.wait().unwrap();
+    writer.join().unwrap();
+    Run {
+        stdout,
+        code: status.code().unwrap_or(-1),
+    }
+}
+
+pub fn run(bin: &Path, args: &[&str], input: &[u8], env: &[(&str, &OsStr)]) -> Run {
+    run_chunked(bin, args, input, usize::MAX, env)
+}
+
+/// Number of times the stub solver started, from its `Z3STUB_LOG`.
+pub fn launches(log: &Path) -> usize {
+    std::fs::read_to_string(log)
+        .map(|t| t.lines().filter(|l| l.starts_with("launch ")).count())
+        .unwrap_or(0)
+}
+
+/// The `rlimit-count` values in a session's output, in order.
+pub fn rlimit_counts(out: &str) -> Vec<u64> {
+    out.split(":rlimit-count ")
+        .skip(1)
+        .map(|rest| rest.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap())
+        .collect()
+}
+
+/// Like [`run`], but fails the test instead of hanging if `bin` has not
+/// exited within `limit`.
+pub fn run_bounded(
+    bin: &Path,
+    args: &[&str],
+    input: &[u8],
+    env: &[(&str, &OsStr)],
+    limit: std::time::Duration,
+) -> Run {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    for (k, _) in std::env::vars_os() {
+        let k = k.to_string_lossy();
+        if k.starts_with("Z3CACHE_") || k.starts_with("Z3STUB_") {
+            cmd.env_remove(&*k);
+        }
+    }
+    if !env.iter().any(|(k, _)| *k == "Z3CACHE_DIR") {
+        cmd.env("Z3CACHE_DIR", temp_dir("cache"));
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let input = input.to_vec();
+    std::thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.read_to_end(&mut out);
+        out
+    });
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{} did not exit within {limit:?}", bin.display());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    Run {
+        stdout: reader.join().unwrap(),
+        code: status.code().unwrap_or(-1),
+    }
+}
+
+/// Polls `cond` until it holds. The deadline is generous: it only turns a
+/// broken handshake into a failure instead of a hang.
+pub fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !cond() {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting until {what}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// True if the file exists and contains `needle`.
+pub fn file_contains(path: &Path, needle: &str) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|t| t.contains(needle))
+}
+
+/// The line z3cache logs (Z3CACHE_LOG) when it first finds an in-flight
+/// lock held by another session.
+pub const LOCK_BUSY: &str = "in-flight lock busy";

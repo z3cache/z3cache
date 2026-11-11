@@ -1,0 +1,5 @@
+(echo "(error ""hello"")")
+(declare-const x Int)
+(assert (> x 0))
+(check-sat)
+(echo "(error ""bye"")")

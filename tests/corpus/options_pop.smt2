@@ -1,0 +1,8 @@
+(declare-const x Int)
+(declare-const y Int)
+(push)
+(set-option :rlimit 1)
+(pop)
+(assert (> (* x x y) 10))
+(check-sat)
+(get-info :reason-unknown)

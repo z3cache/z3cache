@@ -1,0 +1,7 @@
+(set-option :rlimit 0)
+(push)
+(set-option :rlimit 1)
+(check-sat)
+(set-option :rlimit 0)
+(pop)
+(check-sat)

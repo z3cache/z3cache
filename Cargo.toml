@@ -1,0 +1,15 @@
+[package]
+name = "z3cache"
+version = "0.1.0"
+edition = "2024"
+description = "A drop-in replacement for the z3 binary that caches solver answers"
+license = "MIT"
+publish = false
+
+[dependencies]
+blake3 = "1"
+libc = "0.2"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+
+[profile.release]
+debug = 1
