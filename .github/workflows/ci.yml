@@ -23,11 +23,11 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
 
@@ -43,13 +43,13 @@ jobs:
             verus_asset: arm64-macos
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
 
       - name: Cache Verus
         id: verus-cache
-        uses: actions/cache@v6
+        uses: actions/cache@v6.1.0
         with:
           path: verus-${{ matrix.verus_asset }}
           key: verus-${{ env.VERUS_RELEASE }}-${{ matrix.verus_asset }}
