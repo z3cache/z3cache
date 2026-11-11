@@ -2,22 +2,37 @@
 
 [![CI](https://github.com/z3cache/z3cache/actions/workflows/ci.yml/badge.svg)](https://github.com/z3cache/z3cache/actions/workflows/ci.yml)
 
-z3cache makes [Verus](https://github.com/verus-lang/verus) skip proofs it has
-already checked. It is a drop-in replacement for the `z3` binary that Verus
-runs: answers to solver queries are cached, so a proof that passed once is not
-proved again, in the next run or in another git worktree of the same project.
+**Prove it once, reuse it in every worktree.** z3cache makes
+[Verus](https://github.com/verus-lang/verus) skip proofs it has already
+checked. It is a drop-in replacement for the `z3` binary that Verus runs:
+answers to solver queries go into one cache shared by every git worktree and
+every Verus process on your machine.
 
 ```
-verus ──▶ z3cache ──(only on a cache miss)──▶ z3
-              │
-              ▼
-     one shared cache on disk
+worktree A ─┐
+worktree B ─┼─ verus ──▶ z3cache ──(only on a cache miss)──▶ z3
+worktree C ─┘                │
+                             ▼
+                   one shared cache on disk
 ```
 
-On a large Verus project, a full verification run takes 134 s without the
-cache and 28 s with it. When several worktrees verify the same code at once,
-each query is solved only once: the other worktrees wait for the answer and
-reuse it.
+## Why it helps with many worktrees
+
+If you keep several worktrees of one Verus project (for feature branches,
+reviews, or coding agents working in parallel), each of them normally proves
+everything from scratch. With z3cache, measured on a large Verus project:
+
+- **A new worktree starts warm.** Every proof another worktree has already
+  checked comes from the cache, so a fresh checkout of `main` does not re-prove
+  `main`.
+- **A branch re-proves only what changed.** A branch 22 commits ahead of
+  `main` verified in 31 s instead of about 150 s: 99% of its solver time was
+  answered from the cache.
+- **Parallel worktrees share the work.** When several worktrees verify the
+  same code at once, each query is solved by only one of them; the others
+  wait for the answer and reuse it.
+- **Re-running in one checkout is fast too.** A full verification run took
+  28 s with a warm cache instead of 134 s.
 
 ## How it works
 

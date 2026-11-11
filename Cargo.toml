@@ -2,7 +2,7 @@
 name = "z3cache"
 version = "0.1.0"
 edition = "2024"
-description = "A drop-in replacement for the z3 binary that caches solver answers"
+description = "A drop-in z3 replacement that caches solver answers for Verus, shared across git worktrees"
 license = "MIT"
 repository = "https://github.com/z3cache/z3cache"
 readme = "README.md"
