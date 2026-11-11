@@ -45,7 +45,7 @@ one as the real solver.
 Install z3cache:
 
 ```sh
-cargo install --git https://github.com/z3cache/z3cache
+cargo install z3cache
 ```
 
 Tell z3cache where the real Z3 is, in `~/.config/z3cache/config.toml`:
