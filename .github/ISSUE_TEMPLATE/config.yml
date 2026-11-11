@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a wrong answer or other security problem privately
+    url: https://github.com/z3cache/z3cache/security/advisories/new
+    about: A wrong cached answer can make a failing proof pass. Please report it privately.
