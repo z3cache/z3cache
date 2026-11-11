@@ -2,12 +2,17 @@
 
 use std::ffi::OsString;
 
+use crate::sexp::Lexicon;
+
 pub trait SolverProfile: Sync {
     /// Name of the real solver binary, looked up on `PATH`.
     fn binary_name(&self) -> &'static str;
 
     /// True if these arguments (excluding argv[0]) select proxy mode.
     fn is_proxy_args(&self, args: &[OsString]) -> bool;
+
+    /// Which bytes separate tokens and which the solver rejects (section 5).
+    fn lexicon(&self) -> &'static Lexicon;
 
     /// True if an option, named exactly as written and without the leading
     /// `:`, is on the allowlist. Any other option bypasses (rule 3).
@@ -22,6 +27,11 @@ pub trait SolverProfile: Sync {
 
     /// The command that discards one frame.
     fn pop_command(&self) -> &'static [u8];
+
+    /// Commands, each on a line of its own, that change nothing but make
+    /// the solver discard the result of its latest query, as a `pop` does
+    /// (section 7).
+    fn discard_result_commands(&self) -> &'static [u8];
 
     /// Command that makes the solver print `sentinel` on a line of its own.
     fn sentinel_command(&self, sentinel: &str) -> Vec<u8>;
@@ -64,6 +74,19 @@ pub trait SolverProfile: Sync {
 }
 
 pub struct Z3;
+
+/// Z3 4.16's reader (assumption A8): space, tab, line feed and carriage
+/// return separate tokens. Any other ASCII control byte, or DEL, outside
+/// string literals, quoted symbols and comments is an "unexpected
+/// character" that Z3 reports and then skips, so it must not be dropped as
+/// whitespace. Inside literals they are kept, except NUL, which ends the
+/// value (`(echo "a<NUL>b")` prints `a`).
+pub const Z3_LEXICON: Lexicon = Lexicon {
+    whitespace: b" \t\n\r",
+    rejected: b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\
+                \x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f",
+    rejected_in_literals: b"\x00",
+};
 
 /// Options the cache accepts, by exact spelling (DESIGN section 5). Each is
 /// plain solver configuration: its value is in the key, it does not change
@@ -117,6 +140,10 @@ impl SolverProfile for Z3 {
         smt2 && stdin
     }
 
+    fn lexicon(&self) -> &'static Lexicon {
+        &Z3_LEXICON
+    }
+
     fn is_cached_option(&self, name: &[u8]) -> bool {
         Z3_CACHED_OPTIONS.iter().any(|o| o.as_bytes() == name)
     }
@@ -131,6 +158,11 @@ impl SolverProfile for Z3 {
 
     fn pop_command(&self) -> &'static [u8] {
         b"(pop)"
+    }
+
+    fn discard_result_commands(&self) -> &'static [u8] {
+        // Assumption A9: Z3 discards its latest result on push and pop.
+        b"(push)\n(pop)\n"
     }
 
     fn sentinel_command(&self, sentinel: &str) -> Vec<u8> {
@@ -205,6 +237,20 @@ mod tests {
         assert!(!Z3.is_proxy_args(&args(&["-smt2", "-in", "-in"])));
         assert!(!Z3.is_proxy_args(&args(&["-smt2", "-in", "file.smt2"])));
         assert!(!Z3.is_proxy_args(&args(&["-smt2", "-in", "=x"])));
+    }
+
+    /// The lexicon as Z3 4.16 reads input (assumption A8, checked against a
+    /// real Z3 by `differential::a8_control_bytes_are_read_as_z3_reads_them`).
+    #[test]
+    fn lexicon() {
+        let lx = Z3.lexicon();
+        for b in 0..=255u8 {
+            let space = matches!(b, b' ' | b'\t' | b'\n' | b'\r');
+            assert_eq!(lx.whitespace.contains(&b), space, "{b:#x}");
+            let control = b < 0x20 || b == 0x7f;
+            assert_eq!(lx.rejected.contains(&b), control && !space, "{b:#x}");
+        }
+        assert_eq!(lx.rejected_in_literals, b"\0");
     }
 
     #[test]

@@ -116,6 +116,21 @@ impl Session<'_> {
         Ok(())
     }
 
+    /// After [`Session::materialize`], before the client's next read or
+    /// bypassed command: if a `pop` came after the latest query, Z3 has
+    /// discarded that query's result, but the live solver may not have had
+    /// the popped frame, or may be a new one that has just re-run the query.
+    /// It is then made to discard the result too, so that it answers as Z3
+    /// would have ("model is not available") rather than from a result the
+    /// client can no longer see (section 7).
+    pub(super) fn discard_popped_result(&mut self) -> Result<(), Stop> {
+        if !self.state.popped_since_query() || self.live.is_none() {
+            return Ok(());
+        }
+        let discard = self.profile.discard_result_commands();
+        self.write_solver(discard)
+    }
+
     fn start_solver(&mut self) -> Result<(), Stop> {
         match Channel::spawn(self.real, self.args, self.framing.clone()) {
             Ok(channel) => {

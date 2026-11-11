@@ -43,17 +43,13 @@ pub const SILENT: &[&str] = &[
     "define-fun-rec",
     "define-funs-rec",
     "define-sort",
-    "set-info",
-    "set-logic",
 ];
 
-pub const READ: &[&str] = &[
-    "eval",
-    "get-model",
-    "get-option",
-    "get-unsat-core",
-    "get-value",
-];
+/// `set-info` and `set-logic` are in no table: their effects are global
+/// (`pop` does not undo `:status`, and `:smt-lib-version 2.0` changes how
+/// strings are read), so they bypass. So does `eval`: `:completion true`
+/// installs interpretations in the model, which later commands see.
+pub const READ: &[&str] = &["get-model", "get-option", "get-unsat-core", "get-value"];
 
 pub fn classify(cmd: &Command, profile: &dyn SolverProfile) -> Class {
     let Some(head) = cmd.head() else {
@@ -134,7 +130,7 @@ mod tests {
     use crate::sexp::Splitter;
 
     fn class(src: &str) -> Class {
-        let mut s = Splitter::new();
+        let mut s = Splitter::new(&crate::profile::Z3_LEXICON);
         s.feed(src.as_bytes());
         let cmd = s.next_command().unwrap().unwrap();
         classify(&cmd, &Z3)
@@ -150,6 +146,10 @@ mod tests {
             assert_eq!(class(&format!("({name} x)")), Class::Silent, "{name}");
         }
         assert!(is_bypass(class("(declare-something x)")));
+        // Global, not undone by pop.
+        assert!(is_bypass(class("(set-info :status sat)")));
+        assert!(is_bypass(class("(set-info :smt-lib-version 2.0)")));
+        assert!(is_bypass(class("(set-logic ALL)")));
     }
 
     #[test]
@@ -158,6 +158,9 @@ mod tests {
             assert_eq!(class(&format!("({name})")), Class::Read, "{name}");
         }
         assert_eq!(class("(get-info :reason-unknown)"), Class::Read);
+        // It can change the model.
+        assert!(is_bypass(class("(eval (f 3) :completion true)")));
+        assert!(is_bypass(class("(eval x)")));
     }
 
     #[test]

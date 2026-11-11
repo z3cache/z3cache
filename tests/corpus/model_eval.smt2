@@ -1,0 +1,5 @@
+(declare-fun f (Int) Int)
+(check-sat)
+(eval (f 3) :completion false)
+(eval (f 3) :completion true)
+(eval (f 3) :completion false)

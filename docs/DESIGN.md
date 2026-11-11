@@ -107,9 +107,10 @@ instead of starting a solver that would wait for input from the terminal.
 `exec` alike) takes the first of these that is an executable file and not
 z3cache itself (same device and inode):
 
-1. the `real_z3` setting (`Z3CACHE_REAL_Z3`). If it is set but is not an
-   executable file, or is z3cache, that is an error: an explicit setting is
-   never silently replaced;
+1. the `real_z3` setting (`Z3CACHE_REAL_Z3`). A relative path, a bare name
+   included, is taken from the current directory. If it is set but is not
+   an executable file, or is z3cache, that is an error: an explicit setting
+   is never silently replaced;
 2. `z3` in the directory of the parent process's executable, symlinks
    resolved. When Verus runs z3cache, the parent is Verus's driver
    (`rust_verify`), which a Verus release keeps next to its own `z3`. The
@@ -118,6 +119,12 @@ z3cache itself (same device and inode):
 3. `z3` next to the first `verus` on `PATH`, symlinks resolved, for a Verus
    run some other way (for example through a wrapper script);
 4. the first `z3` on `PATH`.
+
+The solver found is resolved to one absolute path with every symlink
+resolved, and that one file is what the session identifies (section 9),
+hashes into `solver_id` and runs. A relative or bare name could otherwise
+name one file when it is hashed and another when it is run, or a different
+file in each working directory.
 
 Each rule is a few system calls, and any error in one (no parent, a parent
 that has exited, an unreadable `/proc`) only moves on to the next, so the
@@ -138,6 +145,16 @@ A streaming reader splits the input into top-level commands. It understands
 nested parentheses, string literals (with `""` as the only escape), `|quoted
 symbols|` and `;` comments, and copes with commands split across reads.
 
+Which bytes separate tokens comes from the solver profile (assumption A8).
+For Z3 4.16 they are space, tab, line feed and carriage return. Any other
+ASCII control byte, or DEL, outside a string literal, quoted symbol or
+comment makes the input unparseable: Z3 reports it as an unexpected
+character and reads on without it, so dropping it as whitespace would change
+what Z3 is asked (`(assert<form feed>false)` is an error in Z3, not
+`(assert false)`). Inside string literals and quoted symbols such bytes are
+part of the token, except NUL, which Z3 does not keep (`(echo "a<NUL>b")`
+prints `a`) and which is therefore unparseable too. Comments take any byte.
+
 Each command has a **canonical form**: its tokens joined by single spaces, no
 space after `(` or before `)`, comments dropped, string literals and quoted
 symbols byte-exact. Hashing and replay use the canonical form, except for
@@ -152,15 +169,22 @@ tables**). A command in no class causes bypass.
 
 | Class | Commands | Handling |
 |---|---|---|
-| Silent | `declare-*`, `define-*`, `assert`, `set-info`, `set-logic` | Append to the top frame |
+| Silent | `declare-*`, `define-*`, `assert` | Append to the top frame |
 | Scope | `push`, `pop` (optional count) | Open or discard frames |
 | Option | `set-option` of an allowlisted option | Update the option map (section 6) |
 | Local | `echo`, `get-info :version` | Answer without a solver |
 | Statistics | `get-info :all-statistics` | Synthesize or rewrite (section 8) |
 | Query | `check-sat`, `check-sat-assuming` | Look up; append to the top frame |
-| Read | `get-model`, `get-value`, `get-unsat-core`, `eval`, other `get-info`, `get-option` | Look up |
+| Read | `get-model`, `get-value`, `get-unsat-core`, other `get-info`, `get-option` | Look up while the latest result is valid (section 7) |
 | Exit | `exit`, end of input | Shut down |
-| Anything else | `reset`, `get-proof`, other options, unknown commands | Bypass |
+| Anything else | `set-info`, `set-logic`, `eval`, `reset`, `get-proof`, other options, unknown commands | Bypass |
+
+`set-info` and `set-logic` bypass because their effects are global, not
+scoped: `pop` does not undo `(set-info :status sat)`, whose check Z3 still
+applies to later queries, and `:smt-lib-version 2.0` changes how string
+literals are read. Verus sends neither. `eval` bypasses because
+`:completion true` installs interpretations in the model, which changes what
+a later `eval` prints.
 
 `echo` prints the string contents without quotes, as Z3 does. The reply to
 `get-info :version` is recorded the first time a solver gives it and answered
@@ -192,6 +216,13 @@ The session state is:
   query, the hash also covers the response given to the client, because what
   follows a query (a read such as `get-model`, or a later query in the same
   frame) depends on its answer.
+- The **result**: the verdict of the latest query while its result is
+  valid. Z3 discards the result on `push`, `pop` (even `(pop 0)`) and
+  `assert`, and keeps it across declarations and the allowlisted options
+  (assumption A9); the proxy discards it on `push`, `pop` and every silent
+  command. It is not part of a frame: popping a frame does not bring back
+  the result of a query made before the frame was pushed. A flag records
+  whether a `pop` has come since the latest query.
 - A cursor: how much of the path the live solver has received.
 
 ```
@@ -241,7 +272,9 @@ discards a frame the live solver has, the solver is sent `(pop)` too.
 
 **Queries and reads:**
 
-1. Compute the key and look it up.
+1. Compute the key and look it up. A read is answered from the cache, and
+   stored, only while the latest result is valid; otherwise it goes to the
+   solver.
 2. **Hit:** write the stored response. For a query, add its recorded resource
    cost to the virtual counter (section 8) and append it to the top frame.
 3. **Miss:** materialize, send the command followed by a private sentinel
@@ -260,6 +293,17 @@ A fully cached module therefore never starts Z3, and a hit costs one database
 read. A miss costs what it would without the cache, plus loading the context
 once per session.
 
+**A read after a pop.** The live solver may not have had a popped frame (it
+was pushed and popped while the session answered from the cache), or may be
+a new one that has just re-run the latest query, so it may still have the
+result that Z3 would have discarded at the client's `pop`. Before a read
+goes to the solver, and before bypass starts, the solver is therefore sent
+the profile's discard commands (`(push)` and `(pop)` for Z3) if a `pop` has
+come since the latest query, and answers as Z3 would (`model is not
+available`). Every other way a result is discarded (`push`, `assert`) is on
+the path the solver receives. Forwarding the read, rather than bypassing,
+keeps the session caching.
+
 **Errors appear late.** Silent commands are sent only when the solver is
 needed, so an error the solver reports for one reaches the client with the
 next solver response, and its line and column refer to the replayed text. An
@@ -270,7 +314,8 @@ hides an error.
 **Store policy** (`Z3CACHE_STORE`):
 
 - `unsat` (default): store a query only when its response is `unsat`, and a
-  read only when the latest query on the path was answered `unsat`. Failures
+  read only when the latest query was answered `unsat` and its result is
+  still valid. Failures
   are re-solved every time, so a query near its resource limit is retried
   rather than pinned as failing.
 - `all`: also store `sat` and `unknown` and the reads that follow them, except
@@ -644,6 +689,39 @@ hit takes a few microseconds.
   nothing during a normal replay.
 - **Late errors.** Errors in silent commands are reported with the next
   solver response, with line numbers from the replay (section 7).
+- **Reads after declarations.** A read is answered from the cache only right
+  after its query: every silent command discards the result in the proxy,
+  though Z3 keeps it across declarations. Verus reads only right after a
+  query.
+- **Reads are not replayed.** A read answered from the cache is not sent to
+  a solver started later. Z3's `get-model` completes the model, so under
+  the `all` policy a later `eval` (which bypasses) can print a value that Z3
+  would have printed completed.
+- **Option values.** An allowlisted option is cached whatever its value. If
+  Z3 rejects a value (it reports the error and keeps the old one) and a
+  later `set-option` overwrites it, the key holds only the later value, so
+  a warm run can leave out Z3's error.
+- **Push counts.** A `push` count is tracked as given: a count in the
+  billions makes the proxy allocate frames until memory runs out, where Z3
+  would reject it.
+- **Solver identity memo.** The memo of a binary's hash trusts its path,
+  size and modification time: a binary replaced by one of the same size
+  with the modification time kept reuses the old identity.
+- **Parent lookup.** Rule 2 of section 4 trusts the directory of any parent
+  process: a program that is not Verus but has a `z3` beside it makes
+  z3cache use that `z3`.
+- **Files that are not regular.** A log, recording or lock file that is a
+  FIFO blocks the session that opens it (only the config file is checked).
+- **Setup races.** Setup reads the startup file before asking and writes a
+  changed copy after the answer, so an edit made in between is lost; the
+  backup is made once, and holds the file as it was before the first
+  change.
+- **`ZDOTDIR`.** Setup uses `~/.zshenv` even when `ZDOTDIR` is set, in which
+  case zsh reads `$ZDOTDIR/.zshenv` and does not see the setting.
+- **Self-test.** The cold and warm query of `doctor` and `setup` keeps the
+  user's other settings: with `Z3CACHE_VERIFY` set, the warm run starts an
+  audit solver while it is reported as answered from the cache. Its runs
+  have no time limit, so a solver that never answers hangs them.
 
 ## 16. Solver assumptions
 
@@ -656,6 +734,8 @@ hit takes a few microseconds.
 | A5 | Verus passes no arguments beyond `-smt2 -in` | Recorded invocations of full runs |
 | A6 | Verus emits the same commands for identical input | Mostly: repeated runs give identical keys, except that Verus 0.2026.10.26 orders the accessor declarations of enum variants with differing named fields differently from run to run (section 15) |
 | A7 | Reading statistics around a query does not change the solver's answer | Differential tests; not checked systematically |
+| A8 | Only space, tab, line feed and carriage return separate tokens; other ASCII control bytes and DEL are errors outside literals and comments; inside string literals and quoted symbols they are kept, except NUL | Z3 4.16.0, every byte 0x00-0x1f and 0x7f in five positions: differential test `a8_control_bytes_are_read_as_z3_reads_them` |
+| A9 | `push`, `pop` (also `(pop 0)`) and `assert` discard the latest query's result; declarations, `(push 0)`, `echo`, reads, statistics and the allowlisted options do not | Z3 4.16.0, differential test `a9_what_discards_a_result` |
 
 ## 17. Solver profiles
 
@@ -666,10 +746,12 @@ driven over a pipe. Everything that depends on the solver goes through a
 | Concern | Z3 |
 |---|---|
 | Arguments that select proxy mode | `-smt2 -in` |
+| Bytes that separate tokens, and bytes it rejects | Section 5 |
 | `echo` output | Unquoted |
 | Statistics | `rlimit-count`, synthesized (section 8) |
 | Resource limit | `set-option :rlimit`, deterministic |
 | Option allowlist | Section 5 |
+| Commands that discard the latest result | `(push)` `(pop)` (section 7) |
 | Wall-clock options (never stored except `unsat`) | Section 7 |
 
 Another solver would need its own answers to each row. For example, cvc5
@@ -700,9 +782,12 @@ entries apart in one store.
    `Z3CACHE_ASSUME_TTY=1`, lets tests answer its prompt on a pipe.
 3. **Differential:** a corpus of transcripts run through real Z3, the proxy
    cold and the proxy warm, under each store policy and solver lifetime.
-   Output must match apart from statistics and error positions. The corpus
-   includes sessions recorded from the end-to-end sample crates
-   (`verus_*.smt2`), so real Verus traffic is covered without Verus.
+   Output and exit status must match apart from statistics and error
+   positions. The corpus includes sessions recorded from the end-to-end
+   sample crates (`verus_*.smt2`), so real Verus traffic is covered without
+   Verus, and the inputs of past review findings (form feed, reads after a
+   pop, `eval` completion, `set-info`). The assumptions of section 16 that
+   Z3 can show are tests here.
    **Randomized** (`tests/random.rs`): a few hundred sessions generated from
    fixed seeds (declarations, an uninterpreted function, nested push/pop,
    linear arithmetic and boolean assertions, quantifiers, `check-sat`,
@@ -712,7 +797,8 @@ entries apart in one store.
    history may legitimately change (section 13): checks are made inside a
    frame, as Verus makes them; no check runs near its resource limit;
    `get-value` is asked only where the model is unique; `:reason-unknown`
-   is compared only after `unknown`.
+   is compared only after `unknown`, or where there is no result to give a
+   reason for (it is also asked at random points).
 4. **Concurrency:** many processes on one store; one solve per key; sessions
    killed during writes leave a valid store; `gc` running alongside sessions.
    Tests synchronise on events rather than timing.

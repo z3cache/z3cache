@@ -1,0 +1,8 @@
+(declare-const x Int)
+(assert (> x 0))
+(check-sat)
+(get-model)
+(push)
+(pop)
+(eval x)
+(get-info :reason-unknown)

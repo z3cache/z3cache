@@ -13,12 +13,13 @@ use crate::record::Recorder;
 use crate::sexp::Command;
 
 impl Session<'_> {
-    /// Leaves caching for the rest of the session: notes why, and
-    /// materializes.
+    /// Leaves caching for the rest of the session: notes why, materializes,
+    /// and makes the solver discard a result the client's pops discarded.
     fn start_bypass(&mut self, reason: String) -> Result<(), Stop> {
         log!("bypass: {reason}");
         self.bypass_reason = Some(reason);
-        self.materialize()
+        self.materialize()?;
+        self.discard_popped_result()
     }
 
     /// Switches to raw bypass. The bytes for the solver start with the

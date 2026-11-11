@@ -5,6 +5,24 @@
 //! string literals (`""` is the only escape), `|quoted symbols|` and `;`
 //! comments. Each complete command is returned with its raw bytes (for
 //! forwarding unchanged) and its canonical form (for hashing and replay).
+//!
+//! Which bytes separate tokens, and which the solver rejects, come from the
+//! solver profile as a [`Lexicon`]: canonicalisation may only remove what the
+//! solver itself would skip, so a byte the solver would reject makes the
+//! input unparseable instead of disappearing.
+
+/// Which bytes the solver's reader skips between tokens and which it
+/// rejects (DESIGN section 5). The solver profile gives the values.
+pub struct Lexicon {
+    /// Bytes that separate tokens.
+    pub whitespace: &'static [u8],
+    /// Bytes the solver rejects outside string literals, quoted symbols and
+    /// comments. Input with one is unparseable.
+    pub rejected: &'static [u8],
+    /// Bytes the solver does not take literally inside string literals and
+    /// quoted symbols. Input with one is unparseable.
+    pub rejected_in_literals: &'static [u8],
+}
 
 /// One element of a command list, in canonical form.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +109,7 @@ enum Lex {
 /// Incremental splitter. Feed it bytes, then drain commands with
 /// [`Splitter::next_command`] until it returns `None`.
 pub struct Splitter {
+    lexicon: &'static Lexicon,
     buf: Vec<u8>,
     /// Bytes before this index belong to commands already returned.
     consumed: usize,
@@ -103,15 +122,10 @@ pub struct Splitter {
     failed: bool,
 }
 
-impl Default for Splitter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Splitter {
-    pub fn new() -> Self {
+    pub fn new(lexicon: &'static Lexicon) -> Self {
         Splitter {
+            lexicon,
             buf: Vec::new(),
             consumed: 0,
             cmd_start: 0,
@@ -152,6 +166,8 @@ impl Splitter {
                 Lex::Str => {
                     if b == b'"' {
                         self.lex = Lex::StrQuote;
+                    } else if self.lexicon.rejected_in_literals.contains(&b) {
+                        return Some(self.fail("unexpected character in a string literal"));
                     }
                 }
                 Lex::StrQuote => {
@@ -167,6 +183,8 @@ impl Splitter {
                 Lex::QSym => {
                     if b == b'|' {
                         self.lex = Lex::Normal;
+                    } else if self.lexicon.rejected_in_literals.contains(&b) {
+                        return Some(self.fail("unexpected character in a quoted symbol"));
                     }
                 }
                 Lex::Normal => match b {
@@ -185,7 +203,8 @@ impl Splitter {
                         if self.depth == 0 {
                             let end = self.pos + 1;
                             self.pos = end;
-                            return Some(match tokenize(&self.buf[self.cmd_start..end]) {
+                            let src = &self.buf[self.cmd_start..end];
+                            return Some(match tokenize(src, self.lexicon) {
                                 Ok((canonical, items)) => {
                                     let raw = self.buf[self.consumed..end].to_vec();
                                     let text_start = self.cmd_start - self.consumed;
@@ -201,7 +220,12 @@ impl Splitter {
                             });
                         }
                     }
-                    _ if self.depth == 0 && !b.is_ascii_whitespace() => {
+                    // The solver would report it and carry on without it, so
+                    // it must not be dropped as whitespace would be.
+                    _ if self.lexicon.rejected.contains(&b) => {
+                        return Some(self.fail("unexpected character"));
+                    }
+                    _ if self.depth == 0 && !self.lexicon.whitespace.contains(&b) => {
                         return Some(self.fail("text outside a command"));
                     }
                     b'"' => self.lex = Lex::Str,
@@ -248,7 +272,7 @@ enum Tok {
 
 /// Tokenizes one complete, lexically balanced command (starting with `(`
 /// and ending with its matching `)`).
-fn tokenize(src: &[u8]) -> Result<(Vec<u8>, Vec<Item>), ParseError> {
+fn tokenize(src: &[u8], lexicon: &Lexicon) -> Result<(Vec<u8>, Vec<Item>), ParseError> {
     let mut canonical = Vec::with_capacity(src.len());
     let mut items = Vec::new();
     let mut depth = 0usize;
@@ -258,7 +282,7 @@ fn tokenize(src: &[u8]) -> Result<(Vec<u8>, Vec<Item>), ParseError> {
     let mut i = 0usize;
     while i < src.len() {
         let b = src[i];
-        if b.is_ascii_whitespace() {
+        if lexicon.whitespace.contains(&b) {
             separated = true;
             i += 1;
             continue;
@@ -275,7 +299,7 @@ fn tokenize(src: &[u8]) -> Result<(Vec<u8>, Vec<Item>), ParseError> {
             b')' => (Tok::Close, i + 1),
             b'"' => (Tok::Text, string_end(src, i)),
             b'|' => (Tok::Text, qsym_end(src, i)),
-            _ => (Tok::Text, atom_end(src, i)),
+            _ => (Tok::Text, atom_end(src, i, lexicon)),
         };
         if tok == Tok::Text && prev == Some(Tok::Text) && !separated {
             // For example `abc"def"`: the solver's reading of this is not
@@ -339,11 +363,11 @@ fn qsym_end(src: &[u8], start: usize) -> usize {
     }
 }
 
-fn atom_end(src: &[u8], start: usize) -> usize {
+fn atom_end(src: &[u8], start: usize, lexicon: &Lexicon) -> usize {
     let mut j = start;
     while j < src.len() {
         let c = src[j];
-        if c.is_ascii_whitespace() || matches!(c, b'(' | b')' | b'"' | b'|' | b';') {
+        if lexicon.whitespace.contains(&c) || matches!(c, b'(' | b')' | b'"' | b'|' | b';') {
             break;
         }
         j += 1;
@@ -373,9 +397,10 @@ pub fn string_contents(tok: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::Z3_LEXICON;
 
     fn split_all(chunks: &[&[u8]]) -> (Vec<Command>, Option<ParseError>, Vec<u8>) {
-        let mut s = Splitter::new();
+        let mut s = Splitter::new(&Z3_LEXICON);
         let mut cmds = Vec::new();
         for c in chunks {
             s.feed(c);
@@ -484,9 +509,53 @@ mod tests {
         assert_eq!(rest, b"(echo abc\"def\")");
     }
 
+    /// Review finding 1: only the bytes Z3 skips are whitespace. A form
+    /// feed (or any other control byte) between tokens would otherwise
+    /// vanish from the canonical form, turning an input Z3 rejects into one
+    /// it accepts.
+    #[test]
+    fn only_the_solvers_whitespace_separates_tokens() {
+        let (cmds, err, rest) = split_all(&[b"(assert\x0cfalse)\n(check-sat)\n"]);
+        assert!(cmds.is_empty());
+        assert_eq!(err, Some(ParseError("unexpected character")));
+        assert_eq!(rest, b"(assert\x0cfalse)\n(check-sat)\n");
+        for b in (0u8..0x20).chain([0x7f]) {
+            let input = [b"(assert".as_slice(), &[b], b"false)"].concat();
+            let (cmds, err, _) = split_all(&[&input]);
+            if matches!(b, b'\t' | b'\n' | b'\r') {
+                assert_eq!(err, None, "{b:#x}");
+                assert_eq!(cmds[0].canonical, b"(assert false)", "{b:#x}");
+            } else {
+                assert_eq!(err, Some(ParseError("unexpected character")), "{b:#x}");
+            }
+            // Between commands and inside an atom too.
+            let (_, err, _) = split_all(&[&[b"(push)".as_slice(), &[b], b"(pop)"].concat()]);
+            assert_eq!(err.is_some(), !matches!(b, b'\t' | b'\n' | b'\r'), "{b:#x}");
+            let (_, err, _) = split_all(&[&[b"(assert fa".as_slice(), &[b], b"lse)"].concat()]);
+            assert_eq!(err.is_some(), !matches!(b, b'\t' | b'\n' | b'\r'), "{b:#x}");
+            // Inside a comment, any byte; inside a string or quoted symbol,
+            // any but NUL, which Z3 does not take literally.
+            let (cmds, err, _) =
+                split_all(&[&[b"(assert x) ; a".as_slice(), &[b], b"\n"].concat()]);
+            if b != b'\n' {
+                assert_eq!((cmds.len(), err), (1, None), "{b:#x}");
+            }
+            for (open, close) in [(b"(echo \"a", b"\")"), (b"(echo |a", b"|)")] {
+                let input = [open.as_slice(), &[b], close.as_slice()].concat();
+                let (cmds, err, _) = split_all(&[&input]);
+                if b == 0 {
+                    assert!(err.is_some(), "NUL in {input:?}");
+                } else {
+                    assert_eq!(err, None, "{input:?}");
+                    assert_eq!(cmds[0].canonical, input, "{input:?}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn incomplete_command_is_remaining() {
-        let mut s = Splitter::new();
+        let mut s = Splitter::new(&Z3_LEXICON);
         s.feed(b"(push)\n(assert (> x");
         assert!(s.next_command().unwrap().is_ok());
         assert!(s.next_command().is_none());

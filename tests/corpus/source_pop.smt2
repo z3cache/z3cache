@@ -1,0 +1,6 @@
+(push)
+(set-info :source "abc")
+(pop)
+(assert false)
+(check-sat)
+(get-info :source)

@@ -169,7 +169,7 @@ pub fn run(cfg: &Config, profile: &dyn SolverProfile, real: &Path, args: &[OsStr
         phase: Phase::Caching,
         bypass_reason: None,
         state: State::new(),
-        splitter: Splitter::new(),
+        splitter: Splitter::new(profile.lexicon()),
         key_ctx,
         stamp,
         solver_info,
@@ -362,7 +362,7 @@ impl<'a> Session<'a> {
         let verdict = if is_query {
             Some(Verdict::of(&e.response))
         } else {
-            self.state.last_query_verdict()
+            self.state.read_verdict()
         };
         self.policy_allows(verdict).then_some(e)
     }
@@ -391,7 +391,7 @@ impl<'a> Session<'a> {
         let last = if is_query {
             verdict
         } else {
-            self.state.last_query_verdict()
+            self.state.read_verdict()
         };
         // A query's response is exactly its verdict line.
         self.policy_allows(last)
@@ -541,6 +541,7 @@ impl<'a> Session<'a> {
             let (reply, delta) = self.solve(&cmd.canonical)?;
             (reply, Some(delta))
         } else {
+            self.discard_popped_result()?;
             (self.ask(self.wire(cmd), Output::Response)?, None)
         };
         let solve_us = solve_start.elapsed().as_micros() as u64;

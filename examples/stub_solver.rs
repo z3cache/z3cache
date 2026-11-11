@@ -23,6 +23,7 @@
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 
+use z3cache::profile::Z3_LEXICON;
 use z3cache::sexp::{Item, Splitter, string_contents};
 
 fn main() {
@@ -73,7 +74,7 @@ fn main() {
 
     let mut stdin = io::stdin();
     let mut stdout = io::stdout().lock();
-    let mut splitter = Splitter::new();
+    let mut splitter = Splitter::new(&Z3_LEXICON);
     let mut buf = vec![0u8; 4096];
     loop {
         let n = stdin.read(&mut buf).unwrap();

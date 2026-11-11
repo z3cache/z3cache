@@ -20,7 +20,7 @@ pub mod store;
 
 /// Bump on any change to canonicalisation, command classification or key
 /// layout. Old cache entries then become unreachable.
-pub const FORMAT_VERSION: u32 = 5;
+pub const FORMAT_VERSION: u32 = 6;
 
 /// Time since the Unix epoch; zero if the clock is set before it.
 pub fn since_epoch() -> std::time::Duration {

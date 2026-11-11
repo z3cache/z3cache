@@ -84,8 +84,6 @@ struct Frame {
     replay: Vec<Replay>,
     /// The option map when this frame was pushed.
     options_at_push: BTreeMap<Vec<u8>, OptionValue>,
-    /// The verdict of the latest query in this frame.
-    last_query: Option<Verdict>,
 }
 
 impl Frame {
@@ -96,7 +94,6 @@ impl Frame {
             hasher,
             replay: Vec::new(),
             options_at_push,
-            last_query: None,
         }
     }
 }
@@ -118,6 +115,14 @@ pub struct PopUnderflow;
 pub struct State {
     options: BTreeMap<Vec<u8>, OptionValue>,
     frames: Vec<Frame>,
+    /// The verdict of the latest query, while its result is still valid:
+    /// reads can depend on it. Not a property of a frame: `pop` discards the
+    /// result (assumption A9), it does not bring back an earlier one.
+    result: Option<Verdict>,
+    /// A `pop` came after the latest query. The solver discards the result
+    /// then, but a live solver that never had the popped frame does not
+    /// know (section 7).
+    popped_since_query: bool,
 }
 
 impl Default for State {
@@ -131,6 +136,8 @@ impl State {
         State {
             options: BTreeMap::new(),
             frames: vec![Frame::new(BTreeMap::new())],
+            result: None,
+            popped_since_query: false,
         }
     }
 
@@ -143,9 +150,12 @@ impl State {
         self.frames.last_mut().expect("base frame is never popped")
     }
 
-    /// Appends a silent command.
+    /// Appends a silent command. Z3 discards the latest query's result on
+    /// `assert` but keeps it across declarations; every silent command
+    /// discards it here, which costs nothing Verus does.
     pub fn append(&mut self, canonical: impl Into<Vec<u8>>) {
         let canonical = canonical.into();
+        self.result = None;
         let top = self.top();
         put(&mut top.hasher, &canonical);
         top.replay.push(Replay {
@@ -175,12 +185,21 @@ impl State {
             served: Some(served),
             option: None,
         });
-        top.last_query = Some(verdict);
+        self.result = Some(verdict);
+        self.popped_since_query = false;
     }
 
-    /// The verdict of the latest query still on the path, if any.
-    pub fn last_query_verdict(&self) -> Option<Verdict> {
-        self.frames.iter().rev().find_map(|f| f.last_query)
+    /// The verdict of the latest query, if its result is still valid: no
+    /// `push`, `pop` or silent command has come since. A read with no valid
+    /// result is neither answered from the cache nor stored (section 7).
+    pub fn read_verdict(&self) -> Option<Verdict> {
+        self.result
+    }
+
+    /// True if a `pop` came after the latest query (or, with no query yet,
+    /// at all), so that the solver has discarded its result.
+    pub fn popped_since_query(&self) -> bool {
+        self.popped_since_query
     }
 
     /// Number of frames, including the base frame.
@@ -212,6 +231,7 @@ impl State {
     }
 
     pub fn push(&mut self, n: u64) {
+        self.result = None;
         for _ in 0..n {
             self.frames.push(Frame::new(self.options.clone()));
         }
@@ -224,6 +244,9 @@ impl State {
         if n > self.depth() as u64 {
             return Err(PopUnderflow);
         }
+        // Z3 discards the result even on `(pop 0)`.
+        self.result = None;
+        self.popped_since_query = true;
         for _ in 0..n {
             let popped = self.frames.pop().expect("checked depth");
             let changed: Vec<Replay> = self
@@ -329,7 +352,7 @@ mod tests {
 
     /// Feeds commands to a state the way the session does, without a solver.
     fn run(state: &mut State, src: &str) {
-        let mut s = Splitter::new();
+        let mut s = Splitter::new(&crate::profile::Z3_LEXICON);
         s.feed(src.as_bytes());
         while let Some(cmd) = s.next_command() {
             let cmd = cmd.unwrap();
@@ -465,16 +488,52 @@ mod tests {
     }
 
     #[test]
-    fn last_query_verdict_follows_the_path() {
+    fn a_pop_discards_the_result_and_does_not_bring_back_an_earlier_one() {
         let mut st = State::new();
-        assert_eq!(st.last_query_verdict(), None);
+        assert_eq!(st.read_verdict(), None);
+        assert!(!st.popped_since_query());
         st.append_query(b"(check-sat)", b"unsat\n", Verdict::Unsat);
+        assert_eq!(st.read_verdict(), Some(Verdict::Unsat));
         st.push(1);
+        assert_eq!(st.read_verdict(), None);
         st.append_query(b"(check-sat)", b"sat\n", Verdict::Sat);
-        assert_eq!(st.last_query_verdict(), Some(Verdict::Sat));
+        assert_eq!(st.read_verdict(), Some(Verdict::Sat));
+        // The issue the review found: the parent's query was answered
+        // before the child's, and Z3 has no result after the pop.
         st.pop(1).unwrap();
-        assert_eq!(st.last_query_verdict(), Some(Verdict::Unsat));
+        assert_eq!(st.read_verdict(), None);
+        assert!(st.popped_since_query());
         assert_eq!(st.replay(0)[0].served.as_deref(), Some(&b"unsat\n"[..]));
+        // A new query is valid again, and clears the pop.
+        st.append_query(b"(check-sat)", b"unsat\n", Verdict::Unsat);
+        assert_eq!(st.read_verdict(), Some(Verdict::Unsat));
+        assert!(!st.popped_since_query());
+        // `(pop 0)` discards it too, as in Z3.
+        st.pop(0).unwrap();
+        assert_eq!(st.read_verdict(), None);
+        assert!(st.popped_since_query());
+    }
+
+    #[test]
+    fn commands_that_discard_the_result() {
+        let after = |cmds: &str| {
+            let mut st = State::new();
+            run(&mut st, &format!("(declare-const x Int)(check-sat){cmds}"));
+            st.read_verdict()
+        };
+        assert_eq!(after(""), Some(Verdict::Unsat));
+        // Allowlisted options keep it (assumption A9).
+        assert_eq!(after("(set-option :rlimit 0)"), Some(Verdict::Unsat));
+        for cmds in [
+            "(push)",
+            "(push 0)",
+            "(push)(pop)",
+            "(assert (> x 0))",
+            "(declare-const y Int)",
+            "(define-fun z () Int 1)",
+        ] {
+            assert_eq!(after(cmds), None, "{cmds}");
+        }
     }
 
     #[test]

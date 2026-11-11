@@ -1,0 +1,7 @@
+(assert false)
+(check-sat)
+(get-info :reason-unknown)
+(push)
+(check-sat)
+(pop)
+(get-info :reason-unknown)

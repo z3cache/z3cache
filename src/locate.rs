@@ -30,6 +30,8 @@ pub enum Found {
 /// The real solver and how it was found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealSolver {
+    /// Absolute, with symlinks resolved: the one file that is identified,
+    /// hashed and run (DESIGN section 4).
     pub path: PathBuf,
     pub found: Found,
 }
@@ -81,17 +83,26 @@ pub fn find_real_solver(cfg: &Config, profile: &dyn SolverProfile) -> Result<Rea
 /// Finds the real solver, by the first rule that gives an executable file
 /// that is not z3cache:
 ///
-/// 1. the `real_z3` setting; if it is set but unusable, that is an error;
-/// 2. the solver next to the parent process's executable, symlinks resolved;
+/// 1. the `real_z3` setting; if it is set but unusable, that is an error. A
+///    relative path, even a bare name, is taken from the current directory;
+/// 2. the solver next to the parent process's executable, symlinks
+///    resolved;
 /// 3. the solver next to the first `verus` on `PATH`, symlinks resolved;
 /// 4. the first solver on `PATH`.
+///
+/// The result is canonical: absolute, with every symlink resolved, so that
+/// the file whose identity is checked, memoised and hashed is the one that
+/// is run, whatever the current directory or `PATH` of a later step.
 pub fn find_real_solver_in(
     cfg: &Config,
     profile: &dyn SolverProfile,
     s: &Surroundings<'_>,
 ) -> Result<RealSolver, String> {
     let name = profile.binary_name();
-    let usable = |p: &Path| is_executable(p) && (s.me.is_none() || file_id(p) != s.me);
+    let usable = |p: &Path| -> Option<PathBuf> {
+        let p = canonical_executable(p)?;
+        (s.me.is_none() || file_id(&p) != s.me).then_some(p)
+    };
     if let Some(p) = &cfg.real_z3 {
         let given = match cfg.source("real_z3") {
             Source::Env => format!("Z3CACHE_REAL_Z3={}", p.display()),
@@ -101,40 +112,37 @@ pub fn find_real_solver_in(
                 cfg.origin("real_z3").unwrap_or_default()
             ),
         };
-        if !is_executable(p) {
+        let Some(path) = canonical_executable(p) else {
             return Err(format!("{given} is not an executable file"));
-        }
-        if s.me.is_some() && file_id(p) == s.me {
+        };
+        if s.me.is_some() && file_id(&path) == s.me {
             return Err(format!("{given} points at z3cache itself"));
         }
         return Ok(RealSolver {
-            path: p.clone(),
+            path,
             found: Found::Setting,
         });
     }
-    if let Some(parent) = (s.parent_exe)().and_then(|p| std::fs::canonicalize(p).ok()) {
-        let candidate = parent.with_file_name(name);
-        if usable(&candidate) {
-            return Ok(RealSolver {
-                path: candidate,
-                found: Found::NextToParent(parent),
-            });
-        }
+    if let Some(parent) = (s.parent_exe)().and_then(|p| std::fs::canonicalize(p).ok())
+        && let Some(path) = usable(&parent.with_file_name(name))
+    {
+        return Ok(RealSolver {
+            path,
+            found: Found::NextToParent(parent),
+        });
     }
-    if let Some(verus) = first_on_path(s.path.as_deref(), VERUS) {
-        let candidate = verus.with_file_name(name);
-        if usable(&candidate) {
-            return Ok(RealSolver {
-                path: candidate,
-                found: Found::NextToVerus(verus),
-            });
-        }
+    if let Some(verus) = first_on_path(s.path.as_deref(), VERUS)
+        && let Some(path) = usable(&verus.with_file_name(name))
+    {
+        return Ok(RealSolver {
+            path,
+            found: Found::NextToVerus(verus),
+        });
     }
     for dir in std::env::split_paths(s.path.as_deref().unwrap_or_default()) {
-        let candidate = dir.join(name);
-        if usable(&candidate) {
+        if let Some(path) = usable(&dir.join(name)) {
             return Ok(RealSolver {
-                path: candidate,
+                path,
                 found: Found::OnPath,
             });
         }
@@ -144,6 +152,11 @@ pub fn find_real_solver_in(
          next to verus on PATH, or on PATH; run `z3cache setup`, or {}",
         cfg.how_to_set("real_z3")
     ))
+}
+
+/// `p` absolute and with symlinks resolved, if it is an executable file.
+fn canonical_executable(p: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(p).ok().filter(|c| is_executable(c))
 }
 
 /// The first executable file called `name` in a directory of `path` (a
@@ -267,7 +280,7 @@ mod tests {
         let other = l.other.join("z3");
         let cfg = config(Some(other.to_str().unwrap()));
         let found = find(&cfg, Some(&l.release.join("rust_verify")), &[&l.bin], &l.me).unwrap();
-        assert_eq!((found.path, found.found), (other, Found::Setting));
+        assert_eq!((found.path, found.found), (real(&other), Found::Setting));
 
         let missing = config(Some("/nonexistent/z3"));
         let e = find(
@@ -316,7 +329,7 @@ mod tests {
         let found = find(&cfg, None, &[&l.root.join("empty"), &l.other], &l.me).unwrap();
         assert_eq!(
             (found.path, found.found),
-            (l.other.join("z3"), Found::OnPath)
+            (real(&l.other.join("z3")), Found::OnPath)
         );
 
         // Nothing at all.
@@ -377,9 +390,55 @@ mod tests {
         let found = find(&cfg, Some(&parent), &[&l.bin, &shim, &l.other], &l.me).unwrap();
         assert_eq!(
             (found.path, found.found),
-            (l.other.join("z3"), Found::OnPath)
+            (real(&l.other.join("z3")), Found::OnPath)
         );
         let _ = std::fs::remove_dir_all(&l.root);
+    }
+
+    /// Review finding 2: the setting is resolved once, to the one file that
+    /// is then identified and run: a relative path (a bare name too) from
+    /// the current directory, made absolute, with symlinks resolved.
+    #[test]
+    fn the_setting_is_resolved_to_one_canonical_file() {
+        let l = layout("canonical");
+        let link = l.root.join("link-to-z3");
+        symlink(l.other.join("z3"), &link).unwrap();
+        let found = find(&config(Some(link.to_str().unwrap())), None, &[], &l.me).unwrap();
+        assert_eq!(found.path, real(&l.other.join("z3")));
+        let cwd = std::env::current_dir().unwrap();
+        let rel = pathdiff(&l.other.join("z3"), &cwd);
+        let found = find(&config(Some(rel.to_str().unwrap())), None, &[], &l.me).unwrap();
+        assert!(found.path.is_absolute(), "{}", found.path.display());
+        assert_eq!(found.path, real(&l.other.join("z3")));
+        // Every other rule gives a canonical path too: here a z3 on PATH
+        // that is a symlink.
+        let links = l.root.join("links");
+        std::fs::create_dir_all(&links).unwrap();
+        symlink(l.other.join("z3"), links.join("z3")).unwrap();
+        let found = find(&config(None), None, &[&links], &l.me).unwrap();
+        assert_eq!(
+            (found.path, found.found),
+            (real(&l.other.join("z3")), Found::OnPath)
+        );
+        let _ = std::fs::remove_dir_all(&l.root);
+    }
+
+    /// `to` relative to `from`, through `..` components.
+    fn pathdiff(to: &Path, from: &Path) -> PathBuf {
+        let (to, from) = (real(to), real(from));
+        let common = to
+            .components()
+            .zip(from.components())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let mut rel = PathBuf::new();
+        for _ in from.components().skip(common) {
+            rel.push("..");
+        }
+        for c in to.components().skip(common) {
+            rel.push(c);
+        }
+        rel
     }
 
     #[test]

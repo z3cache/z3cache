@@ -478,6 +478,9 @@ impl Gen {
                 // Below the base frame: Z3 reports an error.
                 self.emit("(pop)");
             }
+            // Anywhere: after a push, pop or assertion Z3 has discarded the
+            // latest result and says so (DESIGN section 7).
+            85..=86 => self.emit("(get-info :reason-unknown)"),
             _ => self.assert(),
         }
     }
@@ -520,12 +523,15 @@ impl Gen {
 /// `:reason-unknown` describes solver history rather than the query (Z3
 /// 4.16.0 gives `"unknown"` after an earlier push/pop and `""` without
 /// one), and the proxy sends a `push` only when it needs the solver. Verus
-/// asks for the reason only after `unknown`, where it is compared.
+/// asks for the reason only after `unknown`, where it is compared. That
+/// there is no result to give a reason for is compared everywhere.
 fn comparable(out: &str) -> String {
     let mut o = String::new();
     let mut last = "";
     for line in normalize(out).split_inclusive('\n') {
-        if line.starts_with("(:reason-unknown ") && last != "unknown\n" {
+        let discarded =
+            "(:reason-unknown \"state of the most recent check-sat command is not known\")\n";
+        if line.starts_with("(:reason-unknown ") && last != "unknown\n" && line != discarded {
             o.push_str("(:reason-unknown <after a definite answer>)\n");
             continue;
         }

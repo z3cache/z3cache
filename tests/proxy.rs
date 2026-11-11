@@ -578,9 +578,11 @@ fn the_real_solver_is_found_next_to_the_parent_process() {
     );
     assert_eq!((out.text().as_str(), out.code), ("unsat\n", 0));
     assert_eq!(launches(&stub_log), 1);
+    // The solver is resolved to the file that runs: the stub that the
+    // release's z3 links to.
     let want = format!(
         "real solver {} (next to {}, the program that started z3cache)",
-        release.join("z3").display(),
+        std::fs::canonicalize(stub()).unwrap().display(),
         driver.display()
     );
     assert!(file_contains(&log, &want), "{want:?} not in the log");
@@ -651,7 +653,7 @@ fn the_real_solver_is_found_next_to_verus_on_path() {
     assert!(
         text.contains(&format!(
             "real solver   {} ({how})",
-            release.join("z3").display()
+            std::fs::canonicalize(stub()).unwrap().display()
         )),
         "{text}"
     );
@@ -1828,7 +1830,7 @@ fn doctor_shows_the_config_file_and_sources() {
         "setting       log = none (default)\n".into(),
         format!(
             "real solver   {} (from Z3CACHE_REAL_Z3)\n",
-            f.stub.display()
+            std::fs::canonicalize(&f.stub).unwrap().display()
         ),
     ] {
         assert!(text.contains(&line), "{line}\n{text}");
@@ -1860,4 +1862,151 @@ fn doctor_shows_the_config_file_and_sources() {
     ] {
         assert!(text.contains(&line), "{line}\n{text}");
     }
+}
+
+/// A stand-in solver at `path`: a script that runs the stub with its first
+/// `check-sat` answered `answer`, padded with a comment to exactly `len`
+/// bytes, with a fixed modification time. Two stand-ins with different
+/// answers can so have the same size and modification time.
+fn stand_in(path: &Path, answer: &str, len: usize) {
+    use std::os::unix::fs::PermissionsExt;
+    let body = format!(
+        "Z3STUB_ANSWERS={answer} exec '{}' \"$@\"\n",
+        stub().display()
+    );
+    let head = "#!/bin/sh\n#";
+    let pad = len
+        .checked_sub(head.len() + 1 + body.len())
+        .expect("stand-in too long");
+    let script = format!("{head}{}\n{body}", "x".repeat(pad));
+    assert_eq!(script.len(), len);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, script).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let f = std::fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000))
+        .unwrap();
+}
+
+/// Runs the proxy on `input` in `cwd`, with `env`.
+fn run_in(cwd: &Path, input: &[u8], env: &[(&str, &OsStr)]) -> Run {
+    use std::io::Read;
+    let mut child = proxy_command(&z3cache(), PROXY_ARGS, env)
+        .current_dir(cwd)
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
+    let code = child.wait().unwrap().code().unwrap_or(-1);
+    Run { stdout, code }
+}
+
+/// Review finding 2: `Z3CACHE_REAL_Z3=./z3` names a different file in each
+/// directory. With the same size and modification time, the second must
+/// still not be answered with the first one's answers.
+#[test]
+fn a_relative_solver_path_is_one_file_per_directory() {
+    let dir = temp_dir("relative-identity");
+    let (a, b) = (dir.join("a"), dir.join("b"));
+    stand_in(&a.join("z3"), "unsat", 300);
+    stand_in(&b.join("z3"), "sat", 300);
+    let cache = dir.join("cache");
+    let env = [
+        ("Z3CACHE_REAL_Z3", OsStr::new("./z3")),
+        ("Z3CACHE_DIR", cache.as_os_str()),
+    ];
+    let input = b"(check-sat)\n";
+    assert_eq!(run_in(&a, input, &env).text(), "unsat\n");
+    assert_eq!(run_in(&a, input, &env).text(), "unsat\n");
+    assert_eq!(counter(&cache, "hits"), 1);
+    assert_eq!(run_in(&b, input, &env).text(), "sat\n");
+}
+
+/// Review finding 2: a bare `Z3CACHE_REAL_Z3=z3` names the file in the
+/// current directory, and that file is both the one identified and the one
+/// run, whatever is on PATH.
+#[test]
+fn a_bare_solver_name_is_one_file() {
+    let dir = temp_dir("bare-identity");
+    let (local, on_path) = (dir.join("local"), dir.join("path"));
+    stand_in(&local.join("z3"), "sat", 300);
+    stand_in(&on_path.join("z3"), "unsat", 300);
+    let cache = dir.join("cache");
+    let env = [
+        ("Z3CACHE_REAL_Z3", OsStr::new("z3")),
+        ("Z3CACHE_DIR", cache.as_os_str()),
+        ("PATH", on_path.as_os_str()),
+    ];
+    let input = b"(check-sat)\n";
+    // Seeded from the PATH directory: its z3 runs there.
+    assert_eq!(run_in(&on_path, input, &env).text(), "unsat\n");
+    assert_eq!(run_in(&on_path, input, &env).text(), "unsat\n");
+    assert_eq!(counter(&cache, "hits"), 1);
+    // From the other directory, its own z3, never the other's answer.
+    assert_eq!(run_in(&local, input, &env).text(), "sat\n");
+}
+
+/// Review finding 3: after a pop, the result a read would read is gone
+/// in the solver, even if the client's path looks as it did when it was
+/// valid. The read is neither answered from the cache nor stored, and the
+/// solver, which never had the popped frame, is made to discard its result
+/// before it is asked.
+#[test]
+fn a_read_after_a_pop_goes_to_a_solver_that_has_discarded_its_result() {
+    let f = Fixture::new("read-after-pop");
+    let all = [
+        ("Z3CACHE_STORE", OsStr::new("all")),
+        ("Z3STUB_ANSWERS", OsStr::new("sat,unsat")),
+    ];
+    let input = b"(declare-const x Int)\n(check-sat)\n(get-model)\n(push)\n(assert false)\n\
+        (check-sat)\n(pop)\n(get-model)\n";
+    f.run_env(input, &all);
+    let stored = f.counter("stores");
+    let _ = std::fs::remove_file(&f.log);
+    f.run_env(input, &all);
+    // Both queries and the first read were hits; the last read was not.
+    assert_eq!(f.counter("hits"), 3);
+    assert_eq!(f.counter("stores"), stored, "nothing more stored");
+    assert_eq!(
+        f.received(),
+        [
+            "launch -smt2 -in",
+            "(declare-const x Int)",
+            "(check-sat)",
+            "(push)",
+            "(pop)",
+            "(get-model)",
+        ]
+    );
+}
+
+/// Review finding 3, under the default policy: `get-info :reason-unknown`
+/// after an unsat query is stored, but not served after a pop.
+#[test]
+fn reason_unknown_after_a_pop_is_not_served_from_the_cache() {
+    let f = Fixture::new("reason-after-pop");
+    let input = b"(assert false)\n(check-sat)\n(get-info :reason-unknown)\n(push)\n\
+        (check-sat)\n(pop)\n(get-info :reason-unknown)\n";
+    f.run(input);
+    let _ = std::fs::remove_file(&f.log);
+    f.run(input);
+    // The two queries and the first read.
+    assert_eq!(f.counter("hits"), 3);
+    assert_eq!(
+        f.received(),
+        [
+            "launch -smt2 -in",
+            "(assert false)",
+            "(check-sat)",
+            "(push)",
+            "(pop)",
+            "(get-info :reason-unknown)",
+        ]
+    );
 }

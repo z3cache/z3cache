@@ -1,0 +1,5 @@
+(push)
+(set-info :status sat)
+(pop)
+(assert false)
+(check-sat)

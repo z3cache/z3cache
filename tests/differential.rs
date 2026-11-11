@@ -235,3 +235,160 @@ fn error_shaped_echo_keeps_z3s_exit_status() {
     assert_eq!(normalize(&proxied.text()), normalize(&direct.text()));
     assert_eq!(proxied.code, direct.code);
 }
+
+/// Runs `input` through Z3 directly and through the proxy cold and then
+/// warm on a cache of its own, with `extra` settings, and requires the same
+/// output (apart from error positions and statistics) and exit status.
+fn same_as_z3(z3: &std::path::Path, input: &[u8], extra: &[(&str, &str)], what: &str) {
+    let limit = std::time::Duration::from_secs(60);
+    let direct = run_bounded(z3, ARGS, input, &[], limit);
+    let cache = temp_dir("same-as-z3");
+    let mut env = vec![
+        ("Z3CACHE_REAL_Z3", z3.as_os_str()),
+        ("Z3CACHE_DIR", cache.as_os_str()),
+    ];
+    env.extend(extra.iter().map(|(k, v)| (*k, OsStr::new(v))));
+    for pass in ["cold", "warm"] {
+        let proxied = run_bounded(&z3cache(), ARGS, input, &env, limit);
+        assert_eq!(
+            normalize(&proxied.text()),
+            normalize(&direct.text()),
+            "{what}, {pass}: {:?}",
+            String::from_utf8_lossy(input)
+        );
+        assert_eq!(
+            proxied.code,
+            direct.code,
+            "{what}, {pass}: exit status for {:?}",
+            String::from_utf8_lossy(input)
+        );
+    }
+}
+
+/// A8 and review finding 1: Z3 4.16 skips only space, tab, line feed and
+/// carriage return between tokens; every other ASCII control byte (and
+/// DEL) is an error there, and the proxy must not drop it as whitespace.
+/// Inside strings, quoted symbols and comments they are taken as they are,
+/// except NUL, which cuts a string short. Every such byte, in these
+/// positions, gives the same output and exit status through the proxy, cold
+/// and warm, as through Z3.
+#[test]
+fn a8_control_bytes_are_read_as_z3_reads_them() {
+    let z3 = require_z3!();
+    use z3cache::profile::{SolverProfile, Z3};
+    let lexicon = Z3.lexicon();
+    let contexts: [(&str, &[u8], &[u8]); 5] = [
+        ("between tokens", b"(assert", b"false)\n(check-sat)\n"),
+        ("before a command", b"", b"(assert false)\n(check-sat)\n"),
+        (
+            "in a string",
+            b"(echo \"a",
+            b"b\")\n(assert false)\n(check-sat)\n",
+        ),
+        (
+            "in a quoted symbol",
+            b"(declare-const |a",
+            b"b| Bool)\n(assert false)\n(check-sat)\n",
+        ),
+        ("in a comment", b"(assert false) ; x", b"y\n(check-sat)\n"),
+    ];
+    let bytes: Vec<u8> = (0u8..0x20).chain([0x7f]).collect();
+    // Each byte on a thread of its own: some 500 runs in all.
+    std::thread::scope(|scope| {
+        for &b in &bytes {
+            let z3 = &z3;
+            scope.spawn(move || {
+                // The assumption itself: Z3 skips exactly the profile's
+                // whitespace.
+                let mut input = b"(assert".to_vec();
+                input.push(b);
+                input.extend_from_slice(b"false)\n(check-sat)\n");
+                let direct = run(z3, ARGS, &input, &[]);
+                let skipped = direct.code == 0 && direct.text() == "unsat\n";
+                assert_eq!(
+                    skipped,
+                    lexicon.whitespace.contains(&b),
+                    "byte {b:#04x}: {}",
+                    direct.text()
+                );
+                for (what, before, after) in contexts {
+                    let mut input = before.to_vec();
+                    input.push(b);
+                    input.extend_from_slice(after);
+                    same_as_z3(z3, &input, &[], &format!("byte {b:#04x} {what}"));
+                }
+            });
+        }
+    });
+    // The review's input, under both store policies.
+    for store in ["unsat", "all"] {
+        same_as_z3(
+            &z3,
+            b"(assert\x0cfalse)\n(check-sat)\n",
+            &[("Z3CACHE_STORE", store)],
+            "form feed",
+        );
+    }
+}
+
+/// A9 and review finding 3: what makes Z3 4.16 discard the result of its
+/// latest check-sat (a read then has nothing to read), and what does not.
+/// The proxy's state (`State::read_verdict`) discards it on at least the
+/// first kind and keeps it only across the second, and
+/// `discard_result_commands` must discard it.
+#[test]
+fn a9_what_discards_a_result() {
+    let z3 = require_z3!();
+    use z3cache::profile::{SolverProfile, Z3, Z3_CACHED_OPTIONS};
+    let after = |cmds: &str| {
+        let input = format!(
+            "(declare-const x Int)(declare-fun f (Int) Int)(assert (> x 0))(check-sat)\n{cmds}\n\
+             (get-info :reason-unknown)"
+        );
+        let out = run(&z3, ARGS, input.as_bytes(), &[]).text();
+        match out.strip_prefix("sat\n").unwrap_or(&out) {
+            s if s.ends_with("(:reason-unknown \"\")\n") => true,
+            s if s.ends_with(
+                "(:reason-unknown \"state of the most recent check-sat command is not known\")\n",
+            ) =>
+            {
+                false
+            }
+            s => panic!("{cmds}: {s}"),
+        }
+    };
+    let discard = String::from_utf8(Z3.discard_result_commands().to_vec()).unwrap();
+    for cmds in [
+        "(push)",
+        "(push)(pop)",
+        "(pop 0)",
+        "(assert (> x 1))",
+        "(push)(check-sat)(pop)",
+        discard.as_str(),
+    ] {
+        assert!(!after(cmds), "{cmds} keeps the result");
+    }
+    let mut keep = vec![
+        String::new(),
+        "(push 0)".into(),
+        "(declare-const y Int)".into(),
+        "(define-fun g () Int 1)".into(),
+        "(echo \"e\")".into(),
+        "(get-model)".into(),
+        "(get-value (x))".into(),
+        "(get-option :rlimit)".into(),
+        "(get-info :version)".into(),
+        "(get-info :all-statistics)".into(),
+    ];
+    for name in Z3_CACHED_OPTIONS {
+        let value = match *name {
+            "rlimit" | "smt.arith.solver" | "smt.case_split" => "3",
+            "smt.qi.eager_threshold" => "100.0",
+            _ => "false",
+        };
+        keep.push(format!("(set-option :{name} {value})"));
+    }
+    for cmds in &keep {
+        assert!(after(cmds), "{cmds} discards the result");
+    }
+}
