@@ -1,5 +1,7 @@
 # z3cache
 
+[![CI](https://github.com/z3cache/z3cache/actions/workflows/ci.yml/badge.svg)](https://github.com/z3cache/z3cache/actions/workflows/ci.yml)
+
 A drop-in replacement for the `z3` binary that caches solver answers, so that
 [Verus](https://github.com/verus-lang/verus) proofs already checked once are not
 proved again: not in the next run, and not in another git worktree of the same

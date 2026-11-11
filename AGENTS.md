@@ -86,6 +86,10 @@ Z3CACHE_VERUS=/path/to/verus cargo test --test e2e            # Verus end to end
 Z3CACHE_REAL_Z3=/path/to/verus-dir/z3 Z3CACHE_VERUS=/path/to/verus-dir/verus cargo test
 ```
 
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, clippy with
+warnings as errors, and every tier on Linux and macOS with a Verus release
+and its Z3; a skipped tier fails CI.
+
 `cargo test` builds the stub solver (`examples/stub_solver.rs`); a single
 `cargo test --test proxy` does not, so run `cargo build --examples` first.
 Tests use temporary cache directories and never touch the user's cache.

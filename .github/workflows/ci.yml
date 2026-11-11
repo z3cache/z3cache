@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The Verus release used by the end-to-end tests; its bundled Z3 is the
+  # real solver for the differential tests.
+  VERUS_RELEASE: 0.2026.10.26.d17fbd0
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            verus_asset: x86-linux
+          - os: macos-latest
+            verus_asset: arm64-macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache Verus
+        id: verus-cache
+        uses: actions/cache@v6
+        with:
+          path: verus-${{ matrix.verus_asset }}
+          key: verus-${{ env.VERUS_RELEASE }}-${{ matrix.verus_asset }}
+
+      - name: Download Verus
+        if: steps.verus-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "release/$VERUS_RELEASE" -R verus-lang/verus \
+            -p "verus-$VERUS_RELEASE-${{ matrix.verus_asset }}.zip"
+          unzip -q "verus-$VERUS_RELEASE-${{ matrix.verus_asset }}.zip"
+
+      - name: Install the Rust toolchain Verus needs
+        run: |
+          toolchain=$(python3 -c "import json; print(json.load(open('verus-${{ matrix.verus_asset }}/version.json'))['verus']['toolchain'].split()[0])")
+          rustup toolchain install "$toolchain" --profile minimal
+          echo "Z3CACHE_VERUS=$PWD/verus-${{ matrix.verus_asset }}/verus" >> "$GITHUB_ENV"
+          echo "Z3CACHE_REAL_Z3=$PWD/verus-${{ matrix.verus_asset }}/z3" >> "$GITHUB_ENV"
+
+      - name: Check the tools
+        run: |
+          "$Z3CACHE_REAL_Z3" --version
+          "$Z3CACHE_VERUS" --version
+
+      - name: Test (all tiers)
+        run: |
+          cargo test 2>&1 | tee test.log
+          if grep -n SKIPPED test.log; then
+            echo "::error::a test tier was skipped although Z3 and Verus are installed"
+            exit 1
+          fi

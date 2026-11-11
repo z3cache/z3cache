@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "A drop-in replacement for the z3 binary that caches solver answers"
 license = "MIT"
+repository = "https://github.com/z3cache/z3cache"
+readme = "README.md"
+keywords = ["z3", "smt", "verus", "cache", "verification"]
+categories = ["development-tools", "caching"]
 publish = false
 
 [dependencies]
