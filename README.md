@@ -1,10 +1,15 @@
+<div align="center">
+
 # z3cache
 
-[![CI](https://github.com/z3cache/z3cache/actions/workflows/ci.yml/badge.svg)](https://github.com/z3cache/z3cache/actions/workflows/ci.yml)
+**Prove it once, reuse it in every worktree.**
 
-**Prove it once, reuse it in every worktree.** z3cache makes
-[Verus](https://github.com/verus-lang/verus) skip proofs it has already
-checked. It is a drop-in replacement for the `z3` binary that Verus runs:
+[![CI](https://github.com/z3cache/z3cache/actions/workflows/ci.yml/badge.svg)](https://github.com/z3cache/z3cache/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/z3cache.svg)](https://crates.io/crates/z3cache) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+</div>
+
+z3cache makes [Verus](https://github.com/verus-lang/verus) skip proofs it has
+already checked. It is a drop-in replacement for the `z3` binary that Verus runs:
 answers to solver queries go into one cache shared by every git worktree and
 every Verus process on your machine.
 
