@@ -81,6 +81,7 @@ when it can, and starts the real Z3 only when it cannot.
 
 Terms:
 
+- **Client:** the program driving the solver, normally Verus.
 - **Path:** the commands currently visible to the solver, as a stack of
   frames. `push` opens a frame; `pop` discards the top one.
 - **Materialize:** start the real Z3 if needed and send it the part of the
@@ -113,8 +114,8 @@ symbols byte-exact. Hashing and replay use the canonical form. Two adjacent
 non-parenthesis tokens with nothing between them (such as `abc"def"`) are a
 parse error, because the solver's reading of them is not obvious.
 
-Every command falls into exactly one class. A command in no class causes
-bypass.
+Every command falls into exactly one class of the table below (the **class
+tables**). A command in no class causes bypass.
 
 | Class | Commands | Handling |
 |---|---|---|
@@ -176,8 +177,9 @@ the key layout changes, which makes old entries unreachable.
 Properties:
 
 - **Sibling independence.** After `pop` the state is what it was before the
-  matching `push`, so one function's key does not depend on which functions
-  were checked before it within the same frame.
+  matching `push`, so a function's key does not depend on the queries of
+  functions checked before it. It does depend on top-level declarations made
+  before it (section 15).
 - **Whitespace independence.** Reformatting the input does not change keys.
 - **Exactness.** A hit means the same Z3 binary once received the same
   commands, with the same answers, in the same order.
@@ -262,8 +264,8 @@ reporting an error, so a session that passed on an error exits 1 even if its
 last solver exits 0. Otherwise the session exits with its last solver's
 status, or 0 if none was started.
 
-**Bypass** happens when a command is in no class or sets an option outside
-the allowlist, when a `pop` would go below the base frame, when the solver
+**Bypass** happens when a command is not in the class tables or sets an
+option outside the allowlist (section 5), when a `pop` would go below the base frame, when the solver
 reports an error, or when the input cannot be parsed. Bypass first
 materializes, and is then normally **raw**: bytes are copied unchanged in both
 directions until the solver's output ends.
@@ -273,11 +275,12 @@ the trigger was a `pop` below the base frame or a solver error, and the client
 has already been given a count ahead of the solver's. Framed bypass forwards
 the client's commands one at a time with a sentinel after each command that
 may answer, and shifts `rlimit-count` in statistics responses (section 8). The
-first command or option outside the tables switches it to raw.
+first command or option outside the class tables or allowlist switches it to
+raw.
 
 Framing relies on the sentinel `echo` coming back on a line of its own. Only
-commands in the tables and allowlisted options reach the solver while framing
-is in use, and none of them changes `echo` output. As a safeguard the proxy
+commands in the class tables and allowlisted options reach the solver while
+framing is in use, and none of them changes `echo` output. As a safeguard the proxy
 also accepts the quoted form of the sentinel.
 
 ## 8. Statistics
@@ -294,9 +297,11 @@ monotone, so the proxy owns the counter:
   `(:rlimit-count V)`. With one running, the request is forwarded and the
   value in the response replaced by `V`.
 - In framed bypass, statistics responses are shifted up by `V` minus the real
-  count when bypass began. A raw bypass changes nothing; it is entered without
-  this protection only for a command or option outside the tables, where
-  framing could hang. Verus sends neither.
+  count when bypass began.
+- A raw bypass changes nothing, so after cache hits a later `rlimit-count`
+  can be lower than an earlier one. This happens only when a command or
+  option outside the class tables or allowlist forces a raw bypass, because
+  framing such output could hang. Verus sends no such command or option.
 
 Verus therefore reports the original solve cost for cached queries.
 
@@ -313,8 +318,7 @@ Tables:
   cost, the original solve time, and creation and last-use times.
 - `solver`: the identity of each Z3 binary (BLAKE3 of the executable),
   memoised by path, size and modification time so a binary is hashed once,
-  plus its `get-info :version` reply once seen. With neither a store nor a
-  recording, the binary is not hashed at all.
+  plus its `get-info :version` reply once seen.
 - `counters`: daily totals for `stats`.
 
 Behaviour:
@@ -482,8 +486,8 @@ hit takes a few microseconds.
   An edit early in a module therefore changes the keys of the functions
   checked after it in that module, even if their own proofs are unchanged.
   Keys built from the axioms Z3 actually used (its unsat core) would avoid
-  this. On a large Verus project such misses cost
-  at most about 10% of solver time, so they are not implemented.
+  this. On a large Verus project such misses cost at most about 10% of solver
+  time, so they are not implemented.
 - **Output kept under a lock.** Client output is held in memory while an
   in-flight lock is held (section 10), without a size cap. Verus prints
   nothing during a normal replay.
@@ -514,7 +518,8 @@ driven over a pipe. Everything that depends on the solver goes through a
 | `echo` output | Unquoted |
 | Statistics | `rlimit-count`, synthesized (section 8) |
 | Resource limit | `set-option :rlimit`, deterministic |
-| Option allowlist and wall-clock options | Section 5 |
+| Option allowlist | Section 5 |
+| Wall-clock options (never stored except `unsat`) | Section 7 |
 
 Another solver would need its own answers to each row. For example, cvc5
 quotes `echo` output, and Verus runs it under a wall-clock timeout, so only

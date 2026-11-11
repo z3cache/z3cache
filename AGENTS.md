@@ -18,7 +18,7 @@ tests pass.
 2. **Never fail or hang the build.** Any internal error degrades to a slower
    correct path: store disabled, or bypass. Only `enforce` mode may exit
    non-zero on its own. Never wait for solver output whose format a command
-   outside the tables could have changed. Never write to the client while
+   outside the class tables (section 5) could have changed. Never write to the client while
    holding an in-flight lock, and never wait for a lock without a bound
    (section 10).
 3. **Unknown means bypass.** A command or option that is not in the class

@@ -36,9 +36,8 @@ worktree and every concurrent Verus process on the machine.
 ## Quick start
 
 Requirements: macOS (tested) or Linux (expected to work, not yet tested), a
-recent stable Rust toolchain, and Verus. Verus
-releases ship their own Z3 next to the `verus` binary; z3cache uses that one
-as the real solver.
+recent stable Rust toolchain, and Verus. Verus releases ship their own Z3 next
+to the `verus` binary; z3cache uses that one as the real solver.
 
 ```sh
 # Install
@@ -63,8 +62,8 @@ worktree. To turn it off for one run, set `Z3CACHE_MODE=off`.
 
 ## Is it safe?
 
-A cache hit means: this exact Z3 binary once answered this exact sequence of
-commands, and the answer was `unsat`. z3cache never infers an answer, never
+A cache hit means: this exact Z3 binary once gave this answer to this exact
+sequence of commands. By default only `unsat` answers are stored. z3cache never infers an answer, never
 reports `unsat` that a real Z3 did not produce for the same input, and never
 fails or hangs a build because of the cache. When anything goes wrong inside
 z3cache, it falls back to running Z3 normally.
