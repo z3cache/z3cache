@@ -405,30 +405,35 @@ variable counts as unset.
 | `Z3CACHE_CONFIG` | none | Config file path | See below |
 
 **Config file.** The file is `$Z3CACHE_CONFIG` if that is set and non-empty;
-otherwise `$XDG_CONFIG_HOME/z3cache/config`, or `~/.config/z3cache/config`
-when `XDG_CONFIG_HOME` is unset, on every platform. `Z3CACHE_CONFIG` can only
-be set in the environment. A missing file is normal and silent. Every
-invocation reads it: the proxy, the decision to `exec` the real Z3 (section
-4), and the command-line tools (section 12).
+otherwise `$XDG_CONFIG_HOME/z3cache/config.toml`, or
+`~/.config/z3cache/config.toml` when `XDG_CONFIG_HOME` is unset, on every
+platform. `Z3CACHE_CONFIG` can only be set in the environment. A missing file
+is normal and silent. Every invocation reads it: the proxy, the decision to
+`exec` the real Z3 (section 4), and the command-line tools (section 12).
 
-The file is UTF-8 text, one `key = value` per line:
+The file is a [TOML](https://toml.io) document. Only top-level keys are read:
 
-```
-# ~/.config/z3cache/config
-real_z3 = ~/verus/z3
+```toml
+# ~/.config/z3cache/config.toml
+real_z3 = "~/verus/z3"
 dir = "/var/cache/z3cache"
-max_size = 10G
+max_size = "10G"
+verify = 0.05
 ```
 
 - A key is the variable name without `Z3CACHE_`, in lower case, as in the
   table. Keys are case-sensitive.
-- Blank lines, and lines whose first non-blank character is `#`, are
-  ignored. There are no comments after a value.
-- Whitespace around the key and the value is trimmed. A value wrapped in
-  double quotes loses them, and keeps any whitespace inside; there are no
-  escapes.
+- `real_z3`, `dir`, `log`, `record`, `mode`, `store`, `solver` and
+  `solver_salt` are strings. `max_size` is a size string such as `"2G"` or
+  an integer number of bytes. `verify` and `lock_wait` are numbers, integer
+  or float. `gc_every` is an integer.
 - In `real_z3`, `dir`, `log` and `record`, a leading `~/` stands for `$HOME`.
-- A key with an empty value is unset, as an empty variable is.
+- A key set to the empty string is unset, as an empty variable is.
+
+Parsing uses the `toml` crate's parser alone (no serde): the document becomes
+a table of spanned values, so each key's line is known. A number becomes the
+decimal text its variable would hold, and from there a file value is checked
+exactly as the variable is.
 
 **Nothing in the configuration is an error** (rule 2). Each problem is a
 warning, logged once the log is open (`doctor` and `gc` print them), and the
@@ -437,16 +442,19 @@ setting falls back to the next source:
 - a config file that exists but cannot be read, is not a regular file (a
   FIFO or a terminal could block every solver start) or is larger than
   1 MiB is ignored as a whole;
-- a line that is not UTF-8, has no `=`, or has an unknown key is ignored,
-  with the file name and line number;
-- a key given twice takes the last value, with a warning;
+- a file that is not UTF-8 or not valid TOML (including a key given twice)
+  is ignored as a whole, with one warning giving the parser's line, column
+  and message;
+- an unknown key, a table or array where a value is expected, a value of
+  the wrong type, or a path starting with `~/` when `HOME` is unset is
+  ignored, with the file name, key and line;
 - an invalid value is checked by the same parser as the variable: an invalid
   variable falls back to the file's value, and an invalid file value to the
   default.
 
-`z3cache doctor` shows the config file and whether it was found, then each
-setting's effective value and its source: environment, config file (with the
-line), or default.
+`z3cache doctor` shows the config file and whether it was found (or why it
+was ignored), then each setting's effective value and its source:
+environment, config file (with the key's line), or default.
 
 Modes:
 

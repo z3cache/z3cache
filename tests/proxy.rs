@@ -1509,7 +1509,7 @@ fn error_shaped_echo_is_data() {
 
 /// Writes `text` as a config file in a fresh directory.
 fn config_file(name: &str, text: &[u8]) -> PathBuf {
-    let p = temp_dir(name).join("config");
+    let p = temp_dir(name).join("config.toml");
     std::fs::write(&p, text).unwrap();
     p
 }
@@ -1520,7 +1520,7 @@ fn config_file_sets_the_cache_dir_and_the_solver() {
     let config = config_file(
         "config-dir-file",
         format!(
-            "# z3cache\n\n  real_z3 = \"{}\"\ndir   =   {}  \n",
+            "# z3cache\n\n  real_z3 = \"{}\"\ndir   =   '{}'  # the cache\n",
             f.stub.display(),
             f.cache.display()
         )
@@ -1555,7 +1555,7 @@ fn config_file_sets_the_cache_dir_and_the_solver() {
 #[test]
 fn config_file_mode_off_execs_the_real_solver() {
     let f = Fixture::new("config-off");
-    let config = config_file("config-off-file", b"mode = off\n");
+    let config = config_file("config-off-file", b"mode = \"off\"\n");
     let out = f.run_env(b"(check-sat)", &[("Z3CACHE_CONFIG", config.as_os_str())]);
     assert_eq!((out.text().as_str(), out.code), ("unsat\n", 0));
     let log = std::fs::read_to_string(&f.log).unwrap();
@@ -1569,7 +1569,7 @@ fn environment_overrides_the_config_file() {
     let other = temp_dir("config-env-other").join("cache");
     let config = config_file(
         "config-env-file",
-        format!("mode = off\ndir = {}\n", other.display()).as_bytes(),
+        format!("mode = \"off\"\ndir = \"{}\"\n", other.display()).as_bytes(),
     );
     let env = [
         ("Z3CACHE_CONFIG", config.as_os_str()),
@@ -1591,12 +1591,18 @@ fn a_bad_config_file_only_warns() {
     let answers = ("Z3STUB_ANSWERS", OsStr::new("unsat,sat,unsat"));
     let direct = run(&stub(), PROXY_ARGS, &input, &[answers]);
 
-    // Line 1 would make every run read-only; line 7 restores rw.
-    let mut text = b"mode = ro\nnonsense\ncolour = blue\nmax_size = lots\n".to_vec();
-    text.extend_from_slice(b"mode = sometimes\nlog = \xff\xfe\nmode = rw\n");
-    let malformed = config_file("bad-config", &text);
+    // Valid TOML, but no setting in it is usable: the `mode` in the
+    // `[z3cache]` table would make every run read-only.
+    let malformed = config_file(
+        "bad-config",
+        b"colour = \"blue\"\nmax_size = \"lots\"\nmode = \"sometimes\"\nverify = true\n\
+          [z3cache]\nmode = \"ro\"\n",
+    );
+    // Not TOML, or not UTF-8: all of it is ignored, including line 1.
+    let invalid = config_file("bad-config-toml", b"mode = \"ro\"\nnonsense\n");
+    let binary = config_file("bad-config-utf8", b"mode = \"ro\"\nlog = \"\xff\xfe\"\n");
     let unreadable = temp_dir("bad-config-dir");
-    let fifo = temp_dir("bad-config-fifo").join("config");
+    let fifo = temp_dir("bad-config-fifo").join("config.toml");
     let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
     // SAFETY: mkfifo(3) on a path we own.
     assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
@@ -1606,12 +1612,26 @@ fn a_bad_config_file_only_warns() {
         (
             &malformed,
             vec![
-                format!("config file {m} line 2: expected `key = value`"),
-                format!("config file {m} line 3: unknown key \"colour\""),
-                format!("invalid max_size \"lots\" in {m} line 4; using 2G"),
-                format!("config file {m} line 6: not UTF-8"),
-                format!("config file {m} line 7: duplicate key \"mode\""),
+                format!("config file {m} line 1: unknown key \"colour\"; ignored"),
+                format!("invalid max_size \"lots\" in {m} line 2; using 2G"),
+                format!("unknown mode \"sometimes\" in {m} line 3; using rw"),
+                format!("config file {m} line 4: verify must be a number, not a boolean"),
+                format!("config file {m} line 5: unknown key \"z3cache\"; ignored"),
             ],
+        ),
+        (
+            &invalid,
+            vec![format!(
+                "config file {} is not valid TOML: line 2, column 9: ",
+                invalid.display()
+            )],
+        ),
+        (
+            &binary,
+            vec![format!(
+                "config file {} is not valid TOML: line 2: not UTF-8; ignoring it",
+                binary.display()
+            )],
         ),
         (
             &unreadable,
@@ -1651,7 +1671,10 @@ fn a_bad_config_file_only_warns() {
 #[test]
 fn doctor_shows_the_config_file_and_sources() {
     let f = Fixture::new("config-doctor");
-    let config = config_file("config-doctor-file", b"max_size = 500M\n# x\nmode = rw\n");
+    let config = config_file(
+        "config-doctor-file",
+        b"max_size = \"500M\"\n# x\nmode = \"rw\"\n",
+    );
     let env = [
         ("Z3CACHE_CONFIG", config.as_os_str()),
         ("Z3CACHE_DIR", f.cache.as_os_str()),
@@ -1686,4 +1709,22 @@ fn doctor_shows_the_config_file_and_sources() {
         text.contains("setting       max_size = 2G (default)\n"),
         "{text}"
     );
+    // With a file that is not TOML.
+    let config = config_file("config-doctor-invalid", b"max_size = 500M\n");
+    let env = [
+        ("Z3CACHE_CONFIG", config.as_os_str()),
+        ("Z3CACHE_DIR", f.cache.as_os_str()),
+        ("Z3CACHE_REAL_Z3", f.stub.as_os_str()),
+    ];
+    let doctor = run(&z3cache(), &["doctor"], b"", &env);
+    let text = doctor.text();
+    assert_eq!(doctor.code, 0, "{text}");
+    let c = config.display();
+    for line in [
+        format!("warning       config file {c} is not valid TOML: line 1, column 12: "),
+        format!("config file   {c} (INVALID TOML: line 1, column 12: "),
+        "setting       max_size = 2G (default)\n".into(),
+    ] {
+        assert!(text.contains(&line), "{line}\n{text}");
+    }
 }

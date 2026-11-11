@@ -42,15 +42,21 @@ You need macOS or Linux, a recent stable Rust toolchain, and Verus. Verus
 releases include their own `z3` next to the `verus` binary; z3cache uses that
 one as the real solver.
 
+Install z3cache:
+
 ```sh
-# Install
 cargo install --git https://github.com/z3cache/z3cache
+```
 
-# Point z3cache at the z3 that ships with Verus
-mkdir -p ~/.config/z3cache
-echo 'real_z3 = /path/to/verus/z3' >> ~/.config/z3cache/config
+Tell z3cache where the real Z3 is, in `~/.config/z3cache/config.toml`:
 
-# Point Verus at z3cache
+```toml
+real_z3 = "/path/to/verus/z3"
+```
+
+Then point Verus at z3cache and check the setup:
+
+```sh
 export VERUS_Z3_PATH="$HOME/.cargo/bin/z3cache"
 
 # Check the setup: finds Z3, checks the cache, runs one query cold and warm
@@ -100,19 +106,21 @@ Two things to keep in mind:
 
 ## Configuration
 
-Settings live in `~/.config/z3cache/config` (on macOS too), one
-`key = value` per line:
+Settings live in `~/.config/z3cache/config.toml` (on macOS too), a
+[TOML](https://toml.io) file:
 
-```
-# ~/.config/z3cache/config
-real_z3 = ~/verus/z3
-dir = ~/caches/z3cache
-max_size = 10G
+```toml
+# ~/.config/z3cache/config.toml
+real_z3 = "~/verus/z3"
+dir = "~/caches/z3cache"
+max_size = "2G"
+verify = 0.05
 ```
 
-Lines starting with `#` are comments, a value may be wrapped in double
-quotes, and a path may start with `~/`. The file is
-`$XDG_CONFIG_HOME/z3cache/config` if you set `XDG_CONFIG_HOME`, and
+Text values are quoted strings, and a path may start with `~/`. `verify`,
+`lock_wait` and `gc_every` are numbers; `max_size` is a size string such as
+`"500M"` or a number of bytes. The file is
+`$XDG_CONFIG_HOME/z3cache/config.toml` if you set `XDG_CONFIG_HOME`, and
 `Z3CACHE_CONFIG` names another file. Without a file, every setting has its
 default.
 
@@ -130,13 +138,17 @@ command line belongs to Z3.
 | `solver` | `Z3CACHE_SOLVER` | `keep` one solver per session; `fresh` a clean solver for every miss | `keep` |
 | `max_size` | `Z3CACHE_MAX_SIZE` | Size cap, such as `2G` or `500M` | `2G` |
 | `verify` | `Z3CACHE_VERIFY` | Fraction of hits to re-check against Z3 | `0` |
+| `gc_every` | `Z3CACHE_GC_EVERY` | One session in this many checks the cache size at exit; `0` never | `100` |
 | `lock_wait` | `Z3CACHE_LOCK_WAIT` | Seconds to wait for another process solving the same query | `60` |
 | `log` | `Z3CACHE_LOG` | File for diagnostics | none |
 | `record` | `Z3CACHE_RECORD` | Directory to record sessions for `z3cache analyze` | none |
 
-A bad line or an invalid value is never fatal: z3cache logs a warning and
-falls back to the file's value, then the default. `z3cache doctor` shows
-each setting's value and where it came from. Every setting is described in
+A mistake in the file is never fatal: z3cache logs a warning and carries
+on. A file that is not valid TOML is ignored as a whole; an unknown key or a
+bad value is ignored on its own, and that setting has its default. An invalid
+environment variable falls back to the file's value, then the default.
+`z3cache doctor` shows the warnings, and each setting's value and where it
+came from. Every setting is described in
 [docs/DESIGN.md](docs/DESIGN.md), section 11.
 
 ## Commands

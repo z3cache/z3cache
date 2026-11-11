@@ -387,6 +387,9 @@ fn doctor() -> i32 {
         (Some(p), FileStatus::Unreadable(e)) => {
             println!("config file   {} (UNREADABLE: {e}; ignored)", p.display())
         }
+        (Some(p), FileStatus::Invalid(e)) => {
+            println!("config file   {} (INVALID TOML: {e}; ignored)", p.display())
+        }
     }
     for s in &cfg.settings {
         println!(

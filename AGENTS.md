@@ -47,8 +47,6 @@ tests pass.
 
 ## Conventions
 
-- Keep dependencies to `blake3`, `rusqlite` (bundled SQLite) and `libc`; add
-  another only for a strong reason.
 - Every behaviour change comes with a test at the lowest level that can catch
   it: a unit test, then the stub solver (`examples/stub_solver.rs`, a scripted
   stand-in for Z3), then real Z3, then Verus. The stub is an example rather

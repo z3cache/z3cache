@@ -62,7 +62,7 @@ impl Run {
 pub fn no_config() -> PathBuf {
     std::env::temp_dir()
         .join(format!("z3cache-test-{}-no-config", std::process::id()))
-        .join("config")
+        .join("config.toml")
 }
 
 /// A command running `bin` with `args`, stdin and stdout piped, all

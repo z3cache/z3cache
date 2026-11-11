@@ -1,8 +1,9 @@
 //! Configuration (DESIGN section 11): each setting comes from its
 //! environment variable if that is set and non-empty, else from the config
-//! file, else its default. Nothing here is ever an error: an unreadable file,
-//! a malformed line or an invalid value is a warning, and the setting falls
-//! back to the next source.
+//! file (TOML), else its default. Nothing here is ever an error: an
+//! unreadable or invalid file, an unknown key, a value of the wrong type or
+//! an invalid value is a warning, and the setting falls back to the next
+//! source.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -11,6 +12,8 @@ use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use toml::de::{DeInteger, DeTable, DeValue};
 
 use crate::profile::SolverProfile;
 
@@ -49,22 +52,48 @@ pub const DEFAULT_LOCK_WAIT: Duration = Duration::from_secs(60);
 /// One session in this many runs eviction at exit, by default.
 pub const DEFAULT_GC_EVERY: u32 = 100;
 
-/// The config file's keys, in the order `doctor` shows them, and whether
-/// each is a path (a leading `~/` in the file expands to `$HOME`). Each key's
-/// environment variable is `Z3CACHE_` followed by the key in upper case.
-pub const KEYS: &[(&str, bool)] = &[
-    ("real_z3", true),
-    ("dir", true),
-    ("mode", false),
-    ("store", false),
-    ("solver", false),
-    ("max_size", false),
-    ("verify", false),
-    ("gc_every", false),
-    ("lock_wait", false),
-    ("log", true),
-    ("record", true),
-    ("solver_salt", false),
+/// What a config file key accepts, as TOML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A string; a leading `~/` expands to `$HOME`.
+    Path,
+    /// A string.
+    Text,
+    /// A string such as `"2G"`, or an integer number of bytes.
+    Size,
+    /// An integer or a float.
+    Number,
+    /// An integer.
+    Count,
+}
+
+impl Kind {
+    fn expected(self) -> &'static str {
+        match self {
+            Kind::Path | Kind::Text => "a string",
+            Kind::Size => "a string or an integer",
+            Kind::Number => "a number",
+            Kind::Count => "an integer",
+        }
+    }
+}
+
+/// The config file's keys, in the order `doctor` shows them, and what each
+/// accepts. Each key's environment variable is `Z3CACHE_` followed by the
+/// key in upper case.
+pub const KEYS: &[(&str, Kind)] = &[
+    ("real_z3", Kind::Path),
+    ("dir", Kind::Path),
+    ("mode", Kind::Text),
+    ("store", Kind::Text),
+    ("solver", Kind::Text),
+    ("max_size", Kind::Size),
+    ("verify", Kind::Number),
+    ("gc_every", Kind::Count),
+    ("lock_wait", Kind::Number),
+    ("log", Kind::Path),
+    ("record", Kind::Path),
+    ("solver_salt", Kind::Text),
 ];
 
 /// The environment variable for a config file key.
@@ -73,7 +102,7 @@ pub fn env_name(key: &str) -> String {
 }
 
 /// A config file larger than this is ignored: it cannot be a hand-written
-/// list of a dozen settings, and reading it must not slow every solver start.
+/// file of a dozen settings, and reading it must not slow every solver start.
 const MAX_FILE_BYTES: u64 = 1 << 20;
 
 /// Where a setting's effective value came from.
@@ -97,8 +126,11 @@ pub struct Setting {
 pub enum FileStatus {
     Found,
     Missing,
-    /// It exists but could not be used; the reason is also a warning.
+    /// It exists but could not be read; the reason is also a warning.
     Unreadable(String),
+    /// It was read but is not valid TOML, so all of it is ignored; the
+    /// reason is also a warning.
+    Invalid(String),
 }
 
 /// The config file: where it was looked for and what was found.
@@ -137,73 +169,107 @@ pub struct Config {
     pub warnings: Vec<String>,
 }
 
-/// One `key = value` line of the config file.
+/// One top-level key of the config file, its value as text (what the
+/// environment variable would hold) and the line of the key (from 1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
     pub value: OsString,
     pub line: usize,
 }
 
-/// Parses a config file: UTF-8 lines of `key = value`; blank lines and lines
-/// starting with `#` are ignored; whitespace around the key and the value is
-/// trimmed and a value wrapped in double quotes loses them. A leading `~/`
-/// in a path value expands to `home`. Returns the entries by key (the last
-/// of duplicates wins) and a message for each line with a problem.
+/// The settings a config file gives, by key.
+pub type FileEntries = BTreeMap<&'static str, FileEntry>;
+
+/// The line and column (from 1) of byte `offset` in `text`.
+fn position(text: &str, offset: usize) -> (usize, usize) {
+    let mut offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let before = &text[..offset];
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let line = before.matches('\n').count() + 1;
+    (line, before[line_start..].chars().count() + 1)
+}
+
+/// Parses a config file: a TOML document whose top-level keys are those in
+/// [`KEYS`]. A value of the right type becomes the text its environment
+/// variable would hold (numbers in decimal), and a leading `~/` in a path
+/// expands to `home`. Returns the entries by key and, sorted by line, a
+/// message for each key that is ignored: unknown, of the wrong type, or a
+/// path that needs `HOME`. A document that is not valid TOML is an error, a
+/// message giving the line and column.
 pub fn parse_file(
     text: &[u8],
     home: Option<&Path>,
-) -> (BTreeMap<&'static str, FileEntry>, Vec<(usize, String)>) {
-    let mut entries: BTreeMap<&'static str, FileEntry> = BTreeMap::new();
-    let mut problems = Vec::new();
+) -> Result<(FileEntries, Vec<(usize, String)>), String> {
+    // TOML allows a byte order mark; dropping it keeps columns right.
     let text = text.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(text);
-    for (i, raw) in text.split(|&b| b == b'\n').enumerate() {
-        let n = i + 1;
-        let Ok(line) = std::str::from_utf8(raw) else {
-            problems.push((n, "not UTF-8; line ignored".into()));
-            continue;
-        };
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
+    let text = std::str::from_utf8(text).map_err(|e| {
+        let valid = String::from_utf8_lossy(&text[..e.valid_up_to()]);
+        format!("line {}: not UTF-8", position(&valid, valid.len()).0)
+    })?;
+    let doc = DeTable::parse(text).map_err(|e| {
+        let message = e.message().trim_end();
+        match e.span() {
+            Some(span) => {
+                let (line, column) = position(text, span.start);
+                format!("line {line}, column {column}: {message}")
+            }
+            None => message.to_string(),
         }
-        let Some((key, value)) = line.split_once('=') else {
-            problems.push((n, format!("expected `key = value`, got {line:?}; ignored")));
+    })?;
+    let mut entries = FileEntries::new();
+    let mut problems = Vec::new();
+    for (key, value) in doc.get_ref().iter() {
+        let line = position(text, key.span().start).0;
+        let name = key.get_ref().as_ref();
+        let Some(&(name, kind)) = KEYS.iter().find(|(k, _)| *k == name) else {
+            problems.push((line, format!("unknown key {name:?}; ignored")));
             continue;
         };
-        let key = key.trim();
-        let Some(&(key, is_path)) = KEYS.iter().find(|(k, _)| *k == key) else {
-            problems.push((n, format!("unknown key {key:?}; ignored")));
-            continue;
+        let integer = |i: &DeInteger<'_>| {
+            i64::from_str_radix(i.as_str(), i.radix())
+                .map_or_else(|_| i.to_string(), |n| n.to_string())
         };
-        let mut value = value.trim();
-        if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-            value = &value[1..value.len() - 1];
-        }
-        let value = match value.strip_prefix("~/").filter(|_| is_path) {
-            None => OsString::from(value),
+        let text = match (kind, value.get_ref()) {
+            (Kind::Path | Kind::Text | Kind::Size, DeValue::String(s)) => s.to_string(),
+            (Kind::Size | Kind::Number | Kind::Count, DeValue::Integer(i)) => integer(i),
+            (Kind::Number, DeValue::Float(f)) => f.as_str().to_string(),
+            (_, other) => {
+                let found = match other {
+                    DeValue::String(_) => "a string",
+                    DeValue::Integer(_) => "an integer",
+                    DeValue::Float(_) => "a float",
+                    DeValue::Boolean(_) => "a boolean",
+                    DeValue::Datetime(_) => "a date-time",
+                    DeValue::Array(_) => "an array",
+                    DeValue::Table(_) => "a table",
+                };
+                problems.push((
+                    line,
+                    format!("{name} must be {}, not {found}; ignored", kind.expected()),
+                ));
+                continue;
+            }
+        };
+        let value = match text.strip_prefix("~/").filter(|_| kind == Kind::Path) {
+            None => OsString::from(text),
             Some(rest) => match home {
                 Some(h) => h.join(rest).into_os_string(),
                 None => {
                     problems.push((
-                        n,
-                        format!("cannot expand ~ in {key}: HOME is unset; ignored"),
+                        line,
+                        format!("cannot expand ~ in {name}: HOME is unset; ignored"),
                     ));
                     continue;
                 }
             },
         };
-        if let Some(prev) = entries.get(key) {
-            problems.push((
-                n,
-                format!(
-                    "duplicate key {key:?} (also on line {}); this one wins",
-                    prev.line
-                ),
-            ));
-        }
-        entries.insert(key, FileEntry { value, line: n });
+        entries.insert(name, FileEntry { value, line });
     }
-    (entries, problems)
+    problems.sort_by_key(|p| p.0);
+    Ok((entries, problems))
 }
 
 /// How the config file is read: `Ok(None)` if it does not exist.
@@ -247,8 +313,8 @@ fn non_empty(v: Option<OsString>) -> Option<OsString> {
     v.filter(|v| !v.is_empty())
 }
 
-/// `$Z3CACHE_CONFIG`, else `${XDG_CONFIG_HOME:-~/.config}/z3cache/config`,
-/// on every platform.
+/// `$Z3CACHE_CONFIG`, else
+/// `${XDG_CONFIG_HOME:-~/.config}/z3cache/config.toml`, on every platform.
 fn file_location(env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     if let Some(p) = non_empty(env("Z3CACHE_CONFIG")) {
         return Some(PathBuf::from(p));
@@ -256,7 +322,7 @@ fn file_location(env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     non_empty(env("XDG_CONFIG_HOME"))
         .map(PathBuf::from)
         .or_else(|| non_empty(env("HOME")).map(|h| PathBuf::from(h).join(".config")))
-        .map(|d| d.join("z3cache/config"))
+        .map(|d| d.join("z3cache/config.toml"))
 }
 
 /// Looks settings up in the environment, then the file, then the default,
@@ -377,12 +443,21 @@ impl Config {
             }
             Some(Ok(Some(text))) => {
                 let p = path.as_deref().unwrap_or(Path::new("")).display();
-                let (e, problems) = parse_file(&text, home.as_deref());
-                entries = e;
-                for (n, msg) in problems {
-                    warnings.push(format!("config file {p} line {n}: {msg}"));
+                match parse_file(&text, home.as_deref()) {
+                    Ok((e, problems)) => {
+                        entries = e;
+                        for (n, msg) in problems {
+                            warnings.push(format!("config file {p} line {n}: {msg}"));
+                        }
+                        FileStatus::Found
+                    }
+                    Err(e) => {
+                        warnings.push(format!(
+                            "config file {p} is not valid TOML: {e}; ignoring it"
+                        ));
+                        FileStatus::Invalid(e)
+                    }
                 }
-                FileStatus::Found
             }
         };
         let file_name = path
@@ -680,7 +755,7 @@ mod tests {
     use super::*;
 
     /// The configuration from the variables `vars` and, at
-    /// `/cfg/z3cache/config`, the file `file` (`None`: no file).
+    /// `/cfg/z3cache/config.toml`, the file `file` (`None`: no file).
     fn config(vars: &[(&str, &str)], file: Option<&str>) -> Config {
         let mut all = vec![("HOME", "/home/u"), ("XDG_CONFIG_HOME", "/cfg")];
         all.extend_from_slice(vars);
@@ -691,7 +766,7 @@ mod tests {
                 .map(|(_, v)| OsString::from(v))
         };
         let read = |p: &Path| {
-            assert_eq!(p, Path::new("/cfg/z3cache/config"));
+            assert_eq!(p, Path::new("/cfg/z3cache/config.toml"));
             Ok(file.map(|t| t.as_bytes().to_vec()))
         };
         Config::from_sources(&lookup, &read)
@@ -700,7 +775,8 @@ mod tests {
     type Parsed = (Vec<(&'static str, String, usize)>, Vec<(usize, String)>);
 
     fn parse(text: &str) -> Parsed {
-        let (entries, problems) = parse_file(text.as_bytes(), Some(Path::new("/home/u")));
+        let (entries, problems) =
+            parse_file(text.as_bytes(), Some(Path::new("/home/u"))).expect("valid TOML");
         let entries = entries
             .into_iter()
             .map(|(k, e)| (k, e.value.to_string_lossy().into_owned(), e.line))
@@ -709,67 +785,241 @@ mod tests {
     }
 
     #[test]
-    fn file_syntax() {
+    fn file_with_every_key() {
         let (entries, problems) = parse(
-            "# comment\n\n   \n  # indented comment\nmode=ro\n  max_size   =   500M  \n\
-             solver_salt = \"  a = b  \"\nverify = \"\"\r\nstore = \"all\n",
+            "\u{feff}# z3cache\n\
+             real_z3 = \"/opt/z3\"\n\
+             dir = '/var/cache/z3cache'   # a comment\n\
+             mode = \"ro\"\n\
+             store = \"all\"\n\
+             solver = \"fresh\"\n\
+             max_size = \"500M\"\n\
+             verify = 0.05\n\
+             gc_every = 0x10\n\
+             lock_wait = 2.5\n\
+             log = \"\"\"/tmp/z3cache.log\"\"\"\n\
+             record = \"/tmp/rec\"\n\
+             solver_salt = \"  a = b  \"\n",
         );
         assert_eq!(
             entries,
             [
-                ("max_size", "500M".into(), 6),
-                ("mode", "ro".into(), 5),
-                ("solver_salt", "  a = b  ".into(), 7),
-                ("store", "\"all".into(), 9),
-                ("verify", "".into(), 8),
+                ("dir", "/var/cache/z3cache".into(), 3),
+                ("gc_every", "16".into(), 9),
+                ("lock_wait", "2.5".into(), 10),
+                ("log", "/tmp/z3cache.log".into(), 11),
+                ("max_size", "500M".into(), 7),
+                ("mode", "ro".into(), 4),
+                ("real_z3", "/opt/z3".into(), 2),
+                ("record", "/tmp/rec".into(), 12),
+                ("solver", "fresh".into(), 6),
+                ("solver_salt", "  a = b  ".into(), 13),
+                ("store", "all".into(), 5),
+                ("verify", "0.05".into(), 8),
             ]
         );
         assert_eq!(problems, []);
+        let c = config(
+            &[],
+            Some(
+                "real_z3 = \"/opt/z3\"\ndir = \"/d\"\nmode = \"ro\"\nstore = \"all\"\n\
+                 solver = \"fresh\"\nmax_size = \"500M\"\nverify = 0.05\ngc_every = 7\n\
+                 lock_wait = 2.5\nlog = \"/l\"\nrecord = \"/r\"\nsolver_salt = \"s\"\n",
+            ),
+        );
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(c.real_z3, Some("/opt/z3".into()));
+        assert_eq!(c.dir, Some("/d".into()));
+        assert_eq!(c.mode, Mode::Ro);
+        assert_eq!(c.store_policy, StorePolicy::All);
+        assert_eq!(c.lifetime, Lifetime::Fresh);
+        assert_eq!(c.max_size, 500 << 20);
+        assert_eq!(c.verify, 0.05);
+        assert_eq!(c.gc_every, 7);
+        assert_eq!(c.lock_wait, Duration::from_millis(2500));
+        assert_eq!(c.log, Some("/l".into()));
+        assert_eq!(c.record, Some("/r".into()));
+        assert_eq!(c.solver_salt, b"s");
+        assert!(
+            c.settings
+                .iter()
+                .all(|s| matches!(s.source, Source::File(_))),
+            "{:?}",
+            c.settings
+        );
+    }
+
+    #[test]
+    fn numbers_and_strings() {
+        // max_size: a size string or a number of bytes.
+        let c = config(&[], Some("max_size = \"2G\"\n"));
+        assert_eq!(c.max_size, 2 << 30);
+        let c = config(&[], Some("max_size = 1_048_576\n"));
+        assert_eq!(c.max_size, 1 << 20);
+        assert_eq!(c.settings[5].value, "1M");
+        // lock_wait and verify: an integer or a float.
+        let c = config(&[], Some("lock_wait = 5\nverify = 1\n"));
+        assert_eq!(c.lock_wait, Duration::from_secs(5));
+        assert_eq!(c.verify, 1.0);
+        let c = config(&[], Some("lock_wait = 0.25\nverify = 0.5\n"));
+        assert_eq!(c.lock_wait, Duration::from_millis(250));
+        assert_eq!(c.verify, 0.5);
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        // Numbers are checked as their variables are.
+        let c = config(
+            &[],
+            Some("max_size = 0\nlock_wait = -1\nverify = 1.5\ngc_every = -3\n"),
+        );
+        assert_eq!(
+            (c.max_size, c.lock_wait, c.verify, c.gc_every),
+            (DEFAULT_MAX_SIZE, DEFAULT_LOCK_WAIT, 0.0, DEFAULT_GC_EVERY)
+        );
+        assert_eq!(
+            c.warnings,
+            [
+                "invalid max_size \"0\" in /cfg/z3cache/config.toml line 1; using 2G",
+                "invalid verify \"1.5\" in /cfg/z3cache/config.toml line 3; auditing nothing",
+                "invalid gc_every \"-3\" in /cfg/z3cache/config.toml line 4; using 100",
+                "invalid lock_wait \"-1\" in /cfg/z3cache/config.toml line 2; using 60 seconds",
+            ]
+        );
+        let c = config(&[], Some("lock_wait = inf\nverify = nan\n"));
+        assert_eq!((c.lock_wait, c.verify), (DEFAULT_LOCK_WAIT, 0.0));
+        assert_eq!(c.warnings.len(), 2, "{:?}", c.warnings);
     }
 
     #[test]
     fn file_paths_expand_home() {
         let (entries, problems) = parse(
-            "dir = ~/cache\nlog = \"~/z3cache.log\"\nrecord = /abs/~/x\nreal_z3 = ~\n\
-             solver_salt = ~/not-a-path\n",
+            "dir = \"~/cache\"\nlog = '~/z3cache.log'\nrecord = \"/abs/~/x\"\nreal_z3 = \"~\"\n\
+             solver_salt = \"~/not-a-path\"\nmode = \"~/x\"\n",
         );
         assert_eq!(
             entries,
             [
                 ("dir", "/home/u/cache".into(), 1),
                 ("log", "/home/u/z3cache.log".into(), 2),
+                ("mode", "~/x".into(), 6),
                 ("real_z3", "~".into(), 4),
                 ("record", "/abs/~/x".into(), 3),
                 ("solver_salt", "~/not-a-path".into(), 5),
             ]
         );
         assert_eq!(problems, []);
-        let (entries, problems) = parse_file(b"dir = ~/cache\n", None);
+        let (entries, problems) = parse_file(b"\ndir = \"~/cache\"\n", None).unwrap();
         assert!(entries.is_empty());
-        assert_eq!(problems.len(), 1);
-        assert!(problems[0].1.contains("HOME is unset"), "{problems:?}");
+        assert_eq!(
+            problems,
+            [(
+                2,
+                "cannot expand ~ in dir: HOME is unset; ignored".to_string()
+            )]
+        );
     }
 
     #[test]
-    fn file_problems_are_reported_by_line() {
-        let (entries, problems) = parse(
-            "mode = ro\njust words\n= rw\nMODE = rw\nz3cache_dir = /x\nmode = enforce\n\
-             gc_every = 5\n",
+    fn invalid_toml_is_rejected_as_a_whole() {
+        for (text, want) in [
+            (&b"mode = ro\n"[..], "line 1, column 8: "),
+            (b"mode = \"ro\"\njust words\n", "line 2, column "),
+            (
+                b"mode = \"ro\"\nmode = \"rw\"\n",
+                "line 2, column 1: duplicate key",
+            ),
+            (b"mode = \"ro\"\nlog = \"\xff\"\n", "line 2: not UTF-8"),
+            (b"max_size = 500M\n", "line 1, column 12: "),
+            (b"\xEF\xBB\xBFmode = 1x\n", "line 1, column 8: "),
+        ] {
+            let e = parse_file(text, None).unwrap_err();
+            assert!(
+                e.starts_with(want),
+                "{e:?} for {:?}",
+                String::from_utf8_lossy(text)
+            );
+            assert!(!e.contains('\n'), "{e:?}");
+        }
+        let c = config(
+            &[("Z3CACHE_VERIFY", "0.5")],
+            Some("mode = \"ro\"\nmax_size = 500M\n"),
         );
+        let FileStatus::Invalid(e) = &c.file.status else {
+            panic!("{:?}", c.file.status)
+        };
         assert_eq!(
-            entries,
-            [("gc_every", "5".into(), 7), ("mode", "enforce".into(), 6),]
+            c.warnings,
+            [format!(
+                "config file /cfg/z3cache/config.toml is not valid TOML: {e}; ignoring it"
+            )]
         );
-        let lines: Vec<usize> = problems.iter().map(|p| p.0).collect();
-        assert_eq!(lines, [2, 3, 4, 5, 6], "{problems:?}");
-        assert!(problems[0].1.starts_with("expected `key = value`"));
-        assert!(problems[1].1.starts_with("unknown key \"\""));
-        assert!(problems[2].1.starts_with("unknown key \"MODE\""));
-        assert!(problems[3].1.starts_with("unknown key \"z3cache_dir\""));
-        assert!(problems[4].1.contains("also on line 1"), "{problems:?}");
-        let (entries, problems) = parse_file(b"\xEF\xBB\xBFmode = ro\nlog = \xff\xfe\n", None);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(problems, [(2, "not UTF-8; line ignored".to_string())]);
+        // Nothing from the file applies; the environment still does.
+        assert_eq!(
+            (c.mode, c.max_size, c.verify),
+            (Mode::Rw, DEFAULT_MAX_SIZE, 0.5)
+        );
+        assert_eq!(c.source("mode"), Source::Default);
+        assert_eq!(c.source("verify"), Source::Env);
+    }
+
+    #[test]
+    fn deep_nesting_does_not_crash() {
+        // Within the 1 MiB file cap: the parser's recursion limit applies to
+        // arrays and inline tables; dotted keys and headers only nest tables.
+        let n = 200_000;
+        let texts = [
+            format!("mode = {}", "[".repeat(n)),
+            format!("mode = {}", "{a=".repeat(n)),
+            format!("{} = 1\n", ["a"; 200_000].join(".")),
+            format!("[{}]\n", ["mode"; 200_000].join(".")),
+        ];
+        for text in texts {
+            assert!(text.len() < MAX_FILE_BYTES as usize);
+            let _ = parse_file(text.as_bytes(), None);
+        }
+    }
+
+    #[test]
+    fn unknown_keys_and_wrong_types_are_ignored() {
+        let (entries, problems) = parse(
+            "colour = \"blue\"\nMODE = \"rw\"\nmode = \"enforce\"\n\
+             gc_every = 1.5\nverify = \"0.5\"\nmax_size = 2.0\nlock_wait = true\n\
+             dir = 7\nlog = [\"/a\"]\nrecord = { path = \"/r\" }\n\
+             real_z3 = 1979-05-27\nsolver_salt.x = \"y\"\n\
+             [z3cache]\nmode = \"ro\"\n[store]\nkind = \"all\"\n",
+        );
+        assert_eq!(entries, [("mode", "enforce".into(), 3)]);
+        assert_eq!(
+            problems,
+            [
+                (1, "unknown key \"colour\"; ignored".to_string()),
+                (2, "unknown key \"MODE\"; ignored".into()),
+                (
+                    4,
+                    "gc_every must be an integer, not a float; ignored".into()
+                ),
+                (5, "verify must be a number, not a string; ignored".into()),
+                (
+                    6,
+                    "max_size must be a string or an integer, not a float; ignored".into()
+                ),
+                (
+                    7,
+                    "lock_wait must be a number, not a boolean; ignored".into()
+                ),
+                (8, "dir must be a string, not an integer; ignored".into()),
+                (9, "log must be a string, not an array; ignored".into()),
+                (10, "record must be a string, not a table; ignored".into()),
+                (
+                    11,
+                    "real_z3 must be a string, not a date-time; ignored".into()
+                ),
+                (
+                    12,
+                    "solver_salt must be a string, not a table; ignored".into()
+                ),
+                (13, "unknown key \"z3cache\"; ignored".into()),
+                (15, "store must be a string, not a table; ignored".into()),
+            ]
+        );
     }
 
     #[test]
@@ -782,14 +1032,17 @@ mod tests {
             })
         };
         let home = ("HOME", "/home/u");
-        assert_eq!(at(&[home]), Some("/home/u/.config/z3cache/config".into()));
+        assert_eq!(
+            at(&[home]),
+            Some("/home/u/.config/z3cache/config.toml".into())
+        );
         assert_eq!(
             at(&[home, ("XDG_CONFIG_HOME", "")]),
-            Some("/home/u/.config/z3cache/config".into())
+            Some("/home/u/.config/z3cache/config.toml".into())
         );
         assert_eq!(
             at(&[home, ("XDG_CONFIG_HOME", "/x")]),
-            Some("/x/z3cache/config".into())
+            Some("/x/z3cache/config.toml".into())
         );
         assert_eq!(
             at(&[home, ("XDG_CONFIG_HOME", "/x"), ("Z3CACHE_CONFIG", "/c")]),
@@ -797,7 +1050,7 @@ mod tests {
         );
         assert_eq!(
             at(&[home, ("Z3CACHE_CONFIG", "")]),
-            Some("/home/u/.config/z3cache/config".into())
+            Some("/home/u/.config/z3cache/config.toml".into())
         );
         assert_eq!(at(&[]), None);
     }
@@ -831,7 +1084,8 @@ mod tests {
 
     #[test]
     fn env_over_file_over_default() {
-        let file = "mode = ro\nmax_size = 500M\ndir = /from/file\nsolver_salt = s\n";
+        let file =
+            "mode = \"ro\"\nmax_size = \"500M\"\ndir = \"/from/file\"\nsolver_salt = \"s\"\n";
         let c = config(&[], Some(file));
         assert_eq!(c.file.status, FileStatus::Found);
         assert_eq!(c.mode, Mode::Ro);
@@ -842,7 +1096,7 @@ mod tests {
         assert_eq!(c.source("verify"), Source::Default);
         assert_eq!(
             c.origin("mode").as_deref(),
-            Some("mode in /cfg/z3cache/config line 1")
+            Some("mode in /cfg/z3cache/config.toml line 1")
         );
 
         let c = config(
@@ -866,7 +1120,7 @@ mod tests {
     fn empty_values_fall_through() {
         let c = config(
             &[("Z3CACHE_MODE", ""), ("Z3CACHE_DIR", "")],
-            Some("mode = off\ndir = /from/file\nmax_size =\n"),
+            Some("mode = \"off\"\ndir = \"/from/file\"\nmax_size = \"\"\n"),
         );
         assert_eq!(c.mode, Mode::Off);
         assert_eq!(c.dir, Some("/from/file".into()));
@@ -879,7 +1133,7 @@ mod tests {
     fn invalid_values_fall_back_to_the_next_source() {
         let c = config(
             &[("Z3CACHE_MAX_SIZE", "lots"), ("Z3CACHE_VERIFY", "2")],
-            Some("max_size = 1M\nmode = sometimes\nverify = 0.5\ngc_every = -1\n"),
+            Some("max_size = \"1M\"\nmode = \"sometimes\"\nverify = 0.5\ngc_every = -1\n"),
         );
         assert_eq!(c.max_size, 1 << 20);
         assert_eq!(c.mode, Mode::Rw);
@@ -889,10 +1143,10 @@ mod tests {
         assert_eq!(
             c.warnings,
             [
-                "unknown mode \"sometimes\" in /cfg/z3cache/config line 2; using rw",
-                "invalid Z3CACHE_MAX_SIZE \"lots\"; using max_size from /cfg/z3cache/config line 1",
-                "invalid Z3CACHE_VERIFY \"2\"; using verify from /cfg/z3cache/config line 3",
-                "invalid gc_every \"-1\" in /cfg/z3cache/config line 4; using 100",
+                "unknown mode \"sometimes\" in /cfg/z3cache/config.toml line 2; using rw",
+                "invalid Z3CACHE_MAX_SIZE \"lots\"; using max_size from /cfg/z3cache/config.toml line 1",
+                "invalid Z3CACHE_VERIFY \"2\"; using verify from /cfg/z3cache/config.toml line 3",
+                "invalid gc_every \"-1\" in /cfg/z3cache/config.toml line 4; using 100",
             ]
         );
         // Both invalid: the default, with a warning for each.
@@ -904,15 +1158,24 @@ mod tests {
 
     #[test]
     fn file_problems_are_warnings() {
-        let c = config(&[], Some("mode = ro\nwhat\ncolour = blue\nmode = off\n"));
-        assert_eq!(c.mode, Mode::Off);
-        assert_eq!(c.warnings.len(), 3, "{:?}", c.warnings);
-        for (w, n) in c.warnings.iter().zip([2, 3, 4]) {
-            assert!(
-                w.starts_with(&format!("config file /cfg/z3cache/config line {n}: ")),
-                "{w}"
-            );
-        }
+        let c = config(
+            &[("Z3CACHE_GC_EVERY", "5")],
+            Some("mode = \"ro\"\ncolour = \"blue\"\ngc_every = \"7\"\nverify = true\n"),
+        );
+        assert_eq!(c.mode, Mode::Ro);
+        assert_eq!(c.gc_every, 5);
+        assert_eq!(c.verify, 0.0);
+        assert_eq!(c.source("verify"), Source::Default);
+        assert_eq!(
+            c.warnings,
+            [
+                "config file /cfg/z3cache/config.toml line 2: unknown key \"colour\"; ignored",
+                "config file /cfg/z3cache/config.toml line 3: gc_every must be an integer, \
+                 not a string; ignored",
+                "config file /cfg/z3cache/config.toml line 4: verify must be a number, \
+                 not a boolean; ignored",
+            ]
+        );
     }
 
     #[test]
@@ -932,9 +1195,9 @@ mod tests {
         let d = crate::test_dir("config", "read");
         std::fs::create_dir_all(&d).unwrap();
         assert_eq!(read_file(&d.join("missing")), Ok(None));
-        let f = d.join("config");
-        std::fs::write(&f, "mode = ro\n").unwrap();
-        assert_eq!(read_file(&f), Ok(Some(b"mode = ro\n".to_vec())));
+        let f = d.join("config.toml");
+        std::fs::write(&f, "mode = \"ro\"\n").unwrap();
+        assert_eq!(read_file(&f), Ok(Some(b"mode = \"ro\"\n".to_vec())));
         assert_eq!(read_file(&f.join("below-a-file")), Ok(None));
         assert!(read_file(&d).is_err());
         let fifo = d.join("fifo");
