@@ -61,7 +61,10 @@ fn corpus_matches_real_z3_cold_and_warm() {
                     normalize(&direct.text()),
                     "{name}, {config}, {pass}"
                 );
-                assert_eq!(proxied.code, direct.code, "{name}, {config}, {pass}: exit status");
+                assert_eq!(
+                    proxied.code, direct.code,
+                    "{name}, {config}, {pass}: exit status"
+                );
             }
         }
     }
@@ -79,7 +82,12 @@ fn a1_options_survive_pop() {
 #[test]
 fn a2_echo_is_unquoted() {
     let z3 = require_z3!();
-    let out = run(&z3, ARGS, b"(echo \"a b\")(echo \"q\"\"q\")(echo \"\")", &[]);
+    let out = run(
+        &z3,
+        ARGS,
+        b"(echo \"a b\")(echo \"q\"\"q\")(echo \"\")",
+        &[],
+    );
     assert_eq!(out.text(), "a b\nq\"q\n\n");
 }
 
@@ -88,7 +96,12 @@ fn a2_echo_is_unquoted() {
 #[test]
 fn z3_answers_without_a_trailing_newline() {
     let z3 = require_z3!();
-    let out = run(&z3cache(), ARGS, b"(echo \"x\")", &[("Z3CACHE_REAL_Z3", z3.as_os_str())]);
+    let out = run(
+        &z3cache(),
+        ARGS,
+        b"(echo \"x\")",
+        &[("Z3CACHE_REAL_Z3", z3.as_os_str())],
+    );
     assert_eq!(out.text(), "x\n");
 }
 
@@ -164,7 +177,11 @@ fn output_format_options_never_hang() {
             &[("Z3CACHE_REAL_Z3", z3.as_os_str())],
             limit,
         );
-        assert_eq!(normalize(&proxied.text()), normalize(&direct.text()), "{input}");
+        assert_eq!(
+            normalize(&proxied.text()),
+            normalize(&direct.text()),
+            "{input}"
+        );
         assert_eq!(proxied.code, direct.code, "{input}");
     }
     // After a framed bypass (counter ahead of the solver's, pop below the
@@ -196,7 +213,13 @@ fn error_shaped_echo_keeps_z3s_exit_status() {
     let raw = format!("(reset){echo}(check-sat)");
     let direct = run_bounded(&z3, ARGS, raw.as_bytes(), &[], limit);
     assert_eq!(direct.code, 0);
-    let proxied = run_bounded(&z3cache(), ARGS, raw.as_bytes(), &[("Z3CACHE_REAL_Z3", z3.as_os_str())], limit);
+    let proxied = run_bounded(
+        &z3cache(),
+        ARGS,
+        raw.as_bytes(),
+        &[("Z3CACHE_REAL_Z3", z3.as_os_str())],
+        limit,
+    );
     assert_eq!((proxied.text(), proxied.code), (direct.text(), direct.code));
 
     let cache = temp_dir("framed-echo");

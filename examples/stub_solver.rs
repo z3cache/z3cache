@@ -26,8 +26,13 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut log = std::env::var_os("Z3STUB_LOG")
-        .map(|p| OpenOptions::new().create(true).append(true).open(p).unwrap());
+    let mut log = std::env::var_os("Z3STUB_LOG").map(|p| {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .unwrap()
+    });
     if let Some(l) = &mut log {
         writeln!(l, "launch {}", args.join(" ")).unwrap();
     }
@@ -71,7 +76,11 @@ fn main() {
                 l.write_all(b"\n").unwrap();
             }
             let head = String::from_utf8_lossy(cmd.head().unwrap_or(b"")).into_owned();
-            let arg0 = cmd.args().first().map(|i| i.bytes().to_vec()).unwrap_or_default();
+            let arg0 = cmd
+                .args()
+                .first()
+                .map(|i| i.bytes().to_vec())
+                .unwrap_or_default();
             let mut error = |stdout: &mut io::StdoutLock, msg: &str| {
                 errors = true;
                 writeln!(stdout, "(error \"stub: {msg}\")").unwrap();
@@ -83,7 +92,10 @@ fn main() {
                     stdout.write_all(b"\n").unwrap();
                 }
                 "check-sat" | "check-sat-assuming" => {
-                    let mut answer = answers.get(next_answer).map(String::as_str).unwrap_or("unsat");
+                    let mut answer = answers
+                        .get(next_answer)
+                        .map(String::as_str)
+                        .unwrap_or("unsat");
                     next_answer += 1;
                     if let Some(rest) = answer.strip_prefix("gate:") {
                         // Wait until the file exists: a test holds the
@@ -94,7 +106,8 @@ fn main() {
                         // instead of hanging the suite.
                         let (path, then) = rest.rsplit_once(':').expect("gate:PATH:ANSWER");
                         let parent = std::os::unix::process::parent_id();
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(60);
                         while !std::path::Path::new(path).exists() {
                             if std::os::unix::process::parent_id() != parent
                                 || std::time::Instant::now() > deadline
@@ -125,7 +138,9 @@ fn main() {
                     _ => error(&mut stdout, "unsupported info"),
                 },
                 // Like Z3: a model only after sat.
-                "get-model" if last_answer == "unsat" => error(&mut stdout, "model is not available"),
+                "get-model" if last_answer == "unsat" => {
+                    error(&mut stdout, "model is not available")
+                }
                 "get-model" => writeln!(stdout, "(\n  (define-fun x () Int\n    0)\n)").unwrap(),
                 "get-value" => writeln!(stdout, "((x 0))").unwrap(),
                 "push" => depth += 1,
@@ -140,7 +155,12 @@ fn main() {
                         depth -= n;
                     }
                 }
-                "assert" if cmd.canonical.windows(20).any(|w| w == b"stub-multiline-error") => {
+                "assert"
+                    if cmd
+                        .canonical
+                        .windows(20)
+                        .any(|w| w == b"stub-multiline-error") =>
+                {
                     // Like Z3's unknown-parameter error: one response over
                     // several lines.
                     error(&mut stdout, "multiline\n  detail one\n  detail two")
@@ -152,12 +172,16 @@ fn main() {
                 | "set-option" | "set-info" | "set-logic" | "reset" => {}
                 "exit" => {
                     stdout.flush().unwrap();
-                    std::process::exit(i32::from(errors && std::env::var_os("Z3STUB_EXIT_ZERO").is_none()));
+                    std::process::exit(i32::from(
+                        errors && std::env::var_os("Z3STUB_EXIT_ZERO").is_none(),
+                    ));
                 }
                 _ => error(&mut stdout, &format!("unsupported command {head}")),
             }
         }
         stdout.flush().unwrap();
     }
-    std::process::exit(i32::from(errors && std::env::var_os("Z3STUB_EXIT_ZERO").is_none()));
+    std::process::exit(i32::from(
+        errors && std::env::var_os("Z3STUB_EXIT_ZERO").is_none(),
+    ));
 }

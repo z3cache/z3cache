@@ -64,7 +64,12 @@ pub(super) struct ClientOut {
 
 impl ClientOut {
     pub(super) fn new(transcript: Option<BufWriter<File>>) -> ClientOut {
-        ClientOut { transcript, lock: None, held: Vec::new(), closed: false }
+        ClientOut {
+            transcript,
+            lock: None,
+            held: Vec::new(),
+            closed: false,
+        }
     }
 
     /// Writes bytes to the client and flushes them, or keeps them while a

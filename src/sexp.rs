@@ -283,9 +283,11 @@ fn tokenize(src: &[u8]) -> Result<(Vec<u8>, Vec<Item>), ParseError> {
             return Err(ParseError("tokens not separated by whitespace"));
         }
         if let Some(p) = prev
-            && p != Tok::Open && tok != Tok::Close {
-                canonical.push(b' ');
-            }
+            && p != Tok::Open
+            && tok != Tok::Close
+        {
+            canonical.push(b' ');
+        }
         match tok {
             Tok::Open => {
                 depth += 1;
@@ -519,15 +521,33 @@ mod tests {
 
     fn gen_atom(rng: &mut TestRng) -> String {
         match rng.below(6) {
-            0 => rng.pick(&["assert", "check-sat", "push", "x", "f%1", "a.b!c", "+", "=>", "<=", "_"]).to_string(),
-            1 => format!(":{}", rng.pick(&["rlimit", "pattern", "qid", "all-statistics"])),
+            0 => rng
+                .pick(&[
+                    "assert",
+                    "check-sat",
+                    "push",
+                    "x",
+                    "f%1",
+                    "a.b!c",
+                    "+",
+                    "=>",
+                    "<=",
+                    "_",
+                ])
+                .to_string(),
+            1 => format!(
+                ":{}",
+                rng.pick(&["rlimit", "pattern", "qid", "all-statistics"])
+            ),
             2 => rng.below(100_000).to_string(),
             3 => {
                 // A string literal: `""` is the only escape; anything else,
                 // parentheses, `;`, `|` and newlines included, is literal.
                 let mut t = String::from("\"");
                 for _ in 0..rng.below(6) {
-                    t.push_str(rng.pick(&["a", " ", "\"\"", "(", ")", ";", "|", "\n", "\\", "x y"]));
+                    t.push_str(
+                        rng.pick(&["a", " ", "\"\"", "(", ")", ";", "|", "\n", "\\", "x y"]),
+                    );
                 }
                 t.push('"');
                 t
@@ -572,7 +592,11 @@ mod tests {
 
     /// Optional whitespace, where the grammar needs none.
     fn maybe_gap(rng: &mut TestRng) -> String {
-        if rng.chance(30) { gap(rng) } else { String::new() }
+        if rng.chance(30) {
+            gap(rng)
+        } else {
+            String::new()
+        }
     }
 
     /// Writes `sx` with random formatting.
@@ -584,7 +608,8 @@ mod tests {
                 out.push_str(&maybe_gap(rng));
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
-                        let both_atoms = matches!((&items[i - 1], item), (Sx::Atom(_), Sx::Atom(_)));
+                        let both_atoms =
+                            matches!((&items[i - 1], item), (Sx::Atom(_), Sx::Atom(_)));
                         out.push_str(&if both_atoms { gap(rng) } else { maybe_gap(rng) });
                     }
                     write(rng, item, out);
@@ -599,7 +624,10 @@ mod tests {
     fn canonical_of(sx: &Sx) -> String {
         match sx {
             Sx::Atom(a) => a.clone(),
-            Sx::List(items) => format!("({})", items.iter().map(canonical_of).collect::<Vec<_>>().join(" ")),
+            Sx::List(items) => format!(
+                "({})",
+                items.iter().map(canonical_of).collect::<Vec<_>>().join(" ")
+            ),
         }
     }
 
@@ -654,11 +682,16 @@ mod tests {
             let (whole, err, rest) = split_all(&[&input]);
             let shown = String::from_utf8_lossy(&input);
             assert_eq!(err, None, "seed {seed}: {shown:?}");
-            let got: Vec<String> = whole.iter().map(|c| String::from_utf8(c.canonical.clone()).unwrap()).collect();
+            let got: Vec<String> = whole
+                .iter()
+                .map(|c| String::from_utf8(c.canonical.clone()).unwrap())
+                .collect();
             assert_eq!(got, canon, "seed {seed}: {shown:?}");
             assert_eq!(rest, tail, "seed {seed}: {shown:?}");
             for _ in 0..8 {
-                let mut cuts: Vec<usize> = (0..rng.below(5)).map(|_| rng.below(input.len() + 1)).collect();
+                let mut cuts: Vec<usize> = (0..rng.below(5))
+                    .map(|_| rng.below(input.len() + 1))
+                    .collect();
                 cuts.sort_unstable();
                 let (parts, err, rest) = split_at(&input, &cuts);
                 assert_eq!(err, None, "seed {seed}, cuts {cuts:?}: {shown:?}");
@@ -673,7 +706,9 @@ mod tests {
         for seed in 0..SEEDS {
             let mut rng = TestRng::new(seed);
             let (input, _, _) = gen_input(&mut rng);
-            let mut cuts: Vec<usize> = (0..rng.below(4)).map(|_| rng.below(input.len() + 1)).collect();
+            let mut cuts: Vec<usize> = (0..rng.below(4))
+                .map(|_| rng.below(input.len() + 1))
+                .collect();
             cuts.sort_unstable();
             let (cmds, err, rest) = split_at(&input, &cuts);
             assert_eq!(err, None, "seed {seed}");

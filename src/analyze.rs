@@ -214,7 +214,9 @@ pub fn summarize(recordings: &[Recording]) -> Vec<Summary> {
                 s.errored += 1;
             }
             if !sess.get("bypass").is_empty() {
-                *s.bypassed.entry(sess.get("bypass").to_string()).or_default() += 1;
+                *s.bypassed
+                    .entry(sess.get("bypass").to_string())
+                    .or_default() += 1;
             }
             *s.argv.entry(sess.get("argv").to_string()).or_default() += 1;
             s.session_us += sess.num("wall_us");
@@ -281,7 +283,11 @@ pub fn render(summaries: &[Summary]) -> String {
             "  queries           {} taking {} ({}); {} reads",
             s.queries.n,
             secs(s.queries.us),
-            if verdicts.is_empty() { "none".into() } else { verdicts.join(", ") },
+            if verdicts.is_empty() {
+                "none".into()
+            } else {
+                verdicts.join(", ")
+            },
             s.reads
         );
         for (reason, n) in &s.bypassed {
@@ -291,7 +297,10 @@ pub fn render(summaries: &[Summary]) -> String {
             let _ = writeln!(o, "  arguments         {n} x {argv}");
         }
         let Some(sim) = &s.sim else {
-            let _ = writeln!(o, "  projection        none (first recording; nothing to hit)");
+            let _ = writeln!(
+                o,
+                "  projection        none (first recording; nothing to hit)"
+            );
             continue;
         };
         let total = s.queries;
@@ -305,8 +314,16 @@ pub fn render(summaries: &[Summary]) -> String {
                 pct(t.us, total.us)
             );
         };
-        let _ = writeln!(o, "  projection (nothing was cached): a cache filled by recordings 1-{}, storing unsat only, would give:", i);
-        let _ = writeln!(o, "    {:<30} {:>7} {:>7}  {:>10} {:>7}", "", "queries", "", "time", "");
+        let _ = writeln!(
+            o,
+            "  projection (nothing was cached): a cache filled by recordings 1-{}, storing unsat only, would give:",
+            i
+        );
+        let _ = writeln!(
+            o,
+            "    {:<30} {:>7} {:>7}  {:>10} {:>7}",
+            "", "queries", "", "time", ""
+        );
         line(&mut o, "would hit", sim.hits);
         line(&mut o, "would miss: earlier not unsat", sim.not_stored);
         line(&mut o, "would miss: new context only", sim.context_changed);
@@ -351,10 +368,10 @@ mod tests {
             row("k3", "q3", "unsat", 30),
         ]);
         let second = recording(vec![
-            row("k1", "q1", "unsat", 11),   // hit
-            row("k2", "q2", "unsat", 21),   // seen, but stored only if unsat
-            row("k3b", "q3", "unsat", 31),  // same query, other context
-            row("k4", "q4", "unsat", 41),   // new
+            row("k1", "q1", "unsat", 11),  // hit
+            row("k2", "q2", "unsat", 21),  // seen, but stored only if unsat
+            row("k3b", "q3", "unsat", 31), // same query, other context
+            row("k4", "q4", "unsat", 41),  // new
         ]);
         let third = recording(vec![row("k4", "q4", "unsat", 5), row("k2", "q2", "sat", 5)]);
         let s = summarize(&[first, second, third]);

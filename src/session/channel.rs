@@ -37,7 +37,10 @@ impl Output {
 
     /// True if the reply goes to the client.
     pub(super) fn passed_on(&self) -> bool {
-        matches!(self, Output::Response | Output::Statistics(_) | Output::Data)
+        matches!(
+            self,
+            Output::Response | Output::Statistics(_) | Output::Data
+        )
     }
 }
 
@@ -55,7 +58,11 @@ pub(super) struct Section {
 impl Section {
     /// Commands, each on a line of its own.
     pub(super) fn lines(bytes: Vec<u8>, output: Output) -> Section {
-        Section { bytes, inline: false, output }
+        Section {
+            bytes,
+            inline: false,
+            output,
+        }
     }
 
     /// One command on a line of its own.
@@ -67,7 +74,11 @@ impl Section {
 
     /// The client's bytes, as sent.
     pub(super) fn client(raw: &[u8], output: Output) -> Section {
-        Section { bytes: raw.to_vec(), inline: true, output }
+        Section {
+            bytes: raw.to_vec(),
+            inline: true,
+            output,
+        }
     }
 }
 
@@ -108,13 +119,25 @@ pub(super) struct Framing<'a> {
 
 impl<'a> Framing<'a> {
     pub(super) fn new(profile: &'a dyn SolverProfile, sentinel: &str) -> Framing<'a> {
-        Framing { profile, command: profile.sentinel_command(sentinel), lines: profile.sentinel_lines(sentinel) }
+        Framing {
+            profile,
+            command: profile.sentinel_command(sentinel),
+            lines: profile.sentinel_lines(sentinel),
+        }
     }
 
     /// Classifies solver output: the one place it is checked for errors.
     pub(super) fn reply(&self, lines: Vec<Vec<u8>>, output: Output) -> Reply {
-        let error = if output.checked() { lines.iter().position(|l| self.profile.is_error_line(l)) } else { None };
-        Reply { lines, error, output }
+        let error = if output.checked() {
+            lines.iter().position(|l| self.profile.is_error_line(l))
+        } else {
+            None
+        };
+        Reply {
+            lines,
+            error,
+            output,
+        }
     }
 }
 
@@ -125,8 +148,15 @@ pub(super) struct Channel<'a> {
 }
 
 impl<'a> Channel<'a> {
-    pub(super) fn spawn(real: &Path, args: &[OsString], framing: Framing<'a>) -> io::Result<Channel<'a>> {
-        Ok(Channel { solver: Solver::spawn(real, args)?, framing })
+    pub(super) fn spawn(
+        real: &Path,
+        args: &[OsString],
+        framing: Framing<'a>,
+    ) -> io::Result<Channel<'a>> {
+        Ok(Channel {
+            solver: Solver::spawn(real, args)?,
+            framing,
+        })
     }
 
     /// Buffers bytes for the solver without a sentinel. Whatever they make

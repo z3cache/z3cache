@@ -153,11 +153,18 @@ fn statistics_come_from_the_virtual_counter_and_never_decrease() {
     let cold = f.run(input);
     // The first read has no solver to ask; later ones are the stub's
     // statistics with the counter replaced.
-    assert!(cold.text().starts_with("(:rlimit-count 0)\n"), "{}", cold.text());
+    assert!(
+        cold.text().starts_with("(:rlimit-count 0)\n"),
+        "{}",
+        cold.text()
+    );
     assert!(cold.text().contains(":max-memory"));
     assert_eq!(rlimit_counts(&cold.text()), vec![0, 100, 200]);
     let warm = f.run(input);
-    assert_eq!(warm.text(), "(:rlimit-count 0)\nunsat\n(:rlimit-count 100)\nunsat\n(:rlimit-count 200)\n");
+    assert_eq!(
+        warm.text(),
+        "(:rlimit-count 0)\nunsat\n(:rlimit-count 100)\nunsat\n(:rlimit-count 200)\n"
+    );
     // A miss after hits: the stub's own counter restarts at 0, the client's
     // does not.
     let mixed = f.run(
@@ -263,7 +270,10 @@ fn errors_surface_at_the_next_solver_use_and_stop_storing() {
     // with the next answer the solver gives, after the local echoes.
     let f = Fixture::new("errors");
     let out = f.run(b"(echo \"a\")\n(assert stub-error)\n(echo \"b\")\n(check-sat)\n");
-    assert_eq!(out.text(), "a\nb\n(error \"stub: asserted stub-error\")\nunsat\n");
+    assert_eq!(
+        out.text(),
+        "a\nb\n(error \"stub: asserted stub-error\")\nunsat\n"
+    );
     assert_eq!(out.code, 1, "the solver's exit status");
     // Rule 6: nothing is stored from the session afterwards, even a query
     // whose path no longer contains the failing command.
@@ -296,7 +306,10 @@ fn enforce_mode_fails_on_a_miss_without_starting_a_solver() {
     let input = b"(echo \"x\")\n(assert a)\n(check-sat)\n";
     let enforce = [("Z3CACHE_MODE", OsStr::new("enforce"))];
     let out = f.run_env(input, &enforce);
-    assert_eq!(out.text(), "x\n(error \"z3cache: cache miss in enforce mode\")\n");
+    assert_eq!(
+        out.text(),
+        "x\n(error \"z3cache: cache miss in enforce mode\")\n"
+    );
     assert_eq!(out.code, 1);
     assert_eq!(f.launches(), 0);
     f.run(input);
@@ -363,13 +376,21 @@ fn unusable_store_still_answers_correctly() {
 fn interactive_batches_do_not_wait_for_end_of_input() {
     // Like Verus: write a batch, read up to <<DONE>>, then write the next.
     let stub = stub();
-    let mut child = proxy_command(&z3cache(), PROXY_ARGS, &[("Z3CACHE_REAL_Z3", stub.as_os_str())])
-        .spawn()
-        .unwrap();
+    let mut child = proxy_command(
+        &z3cache(),
+        PROXY_ARGS,
+        &[("Z3CACHE_REAL_Z3", stub.as_os_str())],
+    )
+    .spawn()
+    .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     for i in 0..3 {
-        writeln!(stdin, "(push)\n(assert (> x {i}))\n(check-sat)\n(pop)\n(echo \"<<DONE>>\")").unwrap();
+        writeln!(
+            stdin,
+            "(push)\n(assert (> x {i}))\n(check-sat)\n(pop)\n(echo \"<<DONE>>\")"
+        )
+        .unwrap();
         stdin.flush().unwrap();
         let mut lines = Vec::new();
         loop {
@@ -405,12 +426,19 @@ fn bypass_after_cached_answers_replays_the_path() {
     let f = Fixture::new("bypass-replay");
     f.run(b"(declare-const x Int)\n(assert (> x 0))\n(check-sat)\n");
     std::fs::remove_file(&f.log).unwrap();
-    let out = f.run(b"(declare-const x Int)\n(assert (> x 0))\n(check-sat)\n(reset)\n(echo \"after\")\n");
+    let out =
+        f.run(b"(declare-const x Int)\n(assert (> x 0))\n(check-sat)\n(reset)\n(echo \"after\")\n");
     assert_eq!(out.text(), "unsat\nafter\n");
     let got = f.received();
     assert_eq!(
         &got[..5],
-        &["launch -smt2 -in", "(declare-const x Int)", "(assert (> x 0))", "(check-sat)", "(reset)"]
+        &[
+            "launch -smt2 -in",
+            "(declare-const x Int)",
+            "(assert (> x 0))",
+            "(check-sat)",
+            "(reset)"
+        ]
     );
     assert_eq!(f.counter("bypassed_sessions"), 1);
 }
@@ -474,7 +502,12 @@ fn invoked_as_z3_never_selects_the_admin_cli() {
     let dir = temp_dir("symlink");
     let link = dir.join("z3");
     std::os::unix::fs::symlink(z3cache(), &link).unwrap();
-    let out = run(&link, &["stats"], b"", &[("Z3CACHE_REAL_Z3", stub.as_os_str())]);
+    let out = run(
+        &link,
+        &["stats"],
+        b"",
+        &[("Z3CACHE_REAL_Z3", stub.as_os_str())],
+    );
     assert_eq!(out.text(), "stub: unsupported arguments stats\n");
     let out = run(&z3cache(), &["help"], b"", &[]);
     assert!(out.text().starts_with("usage:"));
@@ -491,7 +524,12 @@ fn the_real_solver_is_found_on_path_but_not_ourselves() {
     std::os::unix::fs::symlink(z3cache(), ours.join("z3")).unwrap();
     std::os::unix::fs::symlink(&stub, theirs.join("z3")).unwrap();
     let path = std::env::join_paths([&ours, &theirs]).unwrap();
-    let out = run(&ours.join("z3"), &["--version"], b"", &[("PATH", path.as_os_str())]);
+    let out = run(
+        &ours.join("z3"),
+        &["--version"],
+        b"",
+        &[("PATH", path.as_os_str())],
+    );
     assert_eq!(out.text(), "Z3 version 4.99.0 - 64 bit (stub)\n");
 }
 
@@ -507,15 +545,27 @@ fn cli_stats_clear_doctor() {
     assert_eq!(f.counter("misses"), 1);
     let cleared = f.cli(&["clear"]);
     assert_eq!(cleared.code, 0);
-    assert!(cleared.text().starts_with("deleted 1 entries"), "{}", cleared.text());
+    assert!(
+        cleared.text().starts_with("deleted 1 entries"),
+        "{}",
+        cleared.text()
+    );
     f.run(b"(assert a)\n(check-sat)\n");
     assert_eq!(f.launches(), 2);
     let doctor = f.cli(&["doctor"]);
     assert_eq!(doctor.code, 0, "{}", doctor.text());
-    assert!(doctor.text().contains("no solver started"), "{}", doctor.text());
+    assert!(
+        doctor.text().contains("no solver started"),
+        "{}",
+        doctor.text()
+    );
     let gc = f.cli(&["gc"]);
     assert_eq!(gc.code, 0, "{}", gc.text());
-    assert!(gc.text().contains("within the cap: nothing evicted"), "{}", gc.text());
+    assert!(
+        gc.text().contains("within the cap: nothing evicted"),
+        "{}",
+        gc.text()
+    );
     assert_eq!(f.cli(&["stats", "--bogus"]).code, 2);
 }
 
@@ -576,10 +626,21 @@ fn recording_writes_transcripts_and_keys() {
     let answers = "unsat,sat,unsat";
     let dir = record_with(&input, "rec", answers);
     assert_eq!(std::fs::read(find(&dir, "in")).unwrap(), input);
-    let direct = run(&stub(), PROXY_ARGS, &input, &[("Z3STUB_ANSWERS", OsStr::new(answers))]);
+    let direct = run(
+        &stub(),
+        PROXY_ARGS,
+        &input,
+        &[("Z3STUB_ANSWERS", OsStr::new(answers))],
+    );
     assert_eq!(std::fs::read(find(&dir, "out")).unwrap(), direct.stdout);
     let meta = read_single(&dir, "meta");
-    for field in ["argv=-smt2 -in\n", "exit_code=0\n", "bypass=\n", "errored=0\n", "end_unix_ms="] {
+    for field in [
+        "argv=-smt2 -in\n",
+        "exit_code=0\n",
+        "bypass=\n",
+        "errored=0\n",
+        "end_unix_ms=",
+    ] {
         assert!(meta.contains(field), "missing {field:?} in {meta}");
     }
     let rows = query_rows(&dir);
@@ -592,14 +653,19 @@ fn recording_writes_transcripts_and_keys() {
     assert_ne!(rows[0].2, rows[1].2);
     // Nothing was cached, so nothing is recorded as served from the cache.
     let tsv = read_single(&dir, "tsv");
-    assert!(tsv.lines().skip(1).all(|l| l.ends_with("\tsolver")), "{tsv}");
+    assert!(
+        tsv.lines().skip(1).all(|l| l.ends_with("\tsolver")),
+        "{tsv}"
+    );
 }
 
 #[test]
 fn keys_ignore_formatting_but_not_content() {
     let base = "(declare-fun f (Int) Int)\n(push)\n(assert (> (f 1) 0))\n(check-sat)\n(pop)\n";
-    let reformatted = "; comment\n(declare-fun  f  (Int)\n Int)(push)(assert (>\t(f 1)   0))(check-sat)(pop)";
-    let changed_query = "(declare-fun f (Int) Int)\n(push)\n(assert (> (f 2) 0))\n(check-sat)\n(pop)\n";
+    let reformatted =
+        "; comment\n(declare-fun  f  (Int)\n Int)(push)(assert (>\t(f 1)   0))(check-sat)(pop)";
+    let changed_query =
+        "(declare-fun f (Int) Int)\n(push)\n(assert (> (f 2) 0))\n(check-sat)\n(pop)\n";
     let changed_context = "(declare-fun f (Int) Int)(declare-const c Int)\n(push)\n(assert (> (f 1) 0))\n(check-sat)\n(pop)\n";
     let a = query_rows(&record(base.as_bytes(), "k1"));
     let b = query_rows(&record(reformatted.as_bytes(), "k2"));
@@ -629,9 +695,15 @@ fn analyze_reports_projected_hits() {
     assert_eq!(out.code, 0);
     let text = out.text();
     assert!(text.contains("projection (nothing was cached)"), "{text}");
-    let hit_line = text.lines().find(|l| l.trim_start().starts_with("would hit")).unwrap();
+    let hit_line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("would hit"))
+        .unwrap();
     assert!(hit_line.contains(" 1   50.0%"), "{text}");
-    let new_line = text.lines().find(|l| l.contains("would miss: new query")).unwrap();
+    let new_line = text
+        .lines()
+        .find(|l| l.contains("would miss: new query"))
+        .unwrap();
     assert!(new_line.contains(" 1   50.0%"), "{text}");
 }
 
@@ -672,7 +744,10 @@ fn parameters_off_the_allowlist_run_the_real_solver_directly() {
     );
     assert_eq!(out.text(), "unsat\n");
     let log = std::fs::read_to_string(&f.log).unwrap();
-    assert!(!log.contains("z3cache-sentinel"), "exec'd, not proxied: {log}");
+    assert!(
+        !log.contains("z3cache-sentinel"),
+        "exec'd, not proxied: {log}"
+    );
     assert!(!f.cache.exists());
 }
 
@@ -751,8 +826,12 @@ fn unknown_commands_bypass_raw_and_change_nothing() {
 
 fn sqlite_state(dir: &Path) -> (i64, i64) {
     let conn = rusqlite::Connection::open(dir.join(FILE_NAME)).unwrap();
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    let entries: i64 = conn.query_row("SELECT count(*) FROM entry", [], |r| r.get(0)).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    let entries: i64 = conn
+        .query_row("SELECT count(*) FROM entry", [], |r| r.get(0))
+        .unwrap();
     (version, entries)
 }
 
@@ -823,7 +902,10 @@ fn read_only_modes_leave_entries_and_schema_alone() {
             v
         };
         let existing = names(&f.cache);
-        let out = f.run_env(b"(assert a)\n(check-sat)\n", &[("Z3CACHE_MODE", OsStr::new(mode))]);
+        let out = f.run_env(
+            b"(assert a)\n(check-sat)\n",
+            &[("Z3CACHE_MODE", OsStr::new(mode))],
+        );
         assert_eq!(out.text(), "unsat\n", "{mode} answers from the cache");
         assert_eq!(f.launches(), 1);
         for name in names(&f.cache) {
@@ -833,9 +915,17 @@ fn read_only_modes_leave_entries_and_schema_alone() {
                 "{mode} created {name}"
             );
         }
-        assert_eq!(std::fs::read(f.cache.join(FILE_NAME)).unwrap(), before, "{mode}");
+        assert_eq!(
+            std::fs::read(f.cache.join(FILE_NAME)).unwrap(),
+            before,
+            "{mode}"
+        );
         assert_eq!(sqlite_state(&f.cache), (1, 1));
-        assert_eq!(f.cli(&["stats", "--json"]).text(), counters, "{mode} changed counters");
+        assert_eq!(
+            f.cli(&["stats", "--json"]).text(),
+            counters,
+            "{mode} changed counters"
+        );
     }
 }
 
@@ -847,7 +937,10 @@ fn read_only_modes_in_an_unwritable_directory_just_miss() {
         f.run(b"(assert a)\n(check-sat)\n");
         // No writer is left, so SQLite would have to create its -shm file.
         std::fs::set_permissions(&f.cache, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let out = f.run_env(b"(assert a)\n(check-sat)\n", &[("Z3CACHE_MODE", OsStr::new(mode))]);
+        let out = f.run_env(
+            b"(assert a)\n(check-sat)\n",
+            &[("Z3CACHE_MODE", OsStr::new(mode))],
+        );
         std::fs::set_permissions(&f.cache, std::fs::Permissions::from_mode(0o755)).unwrap();
         // Either the read works, or the store is disabled and the query
         // misses; never a crash.
@@ -881,11 +974,20 @@ fn solver_death_while_idle(f: &Fixture, input: &[u8]) -> i32 {
             break;
         }
     }
-    let pgrep = Command::new("pgrep").args(["-P", &child.id().to_string()]).output().unwrap();
+    let pgrep = Command::new("pgrep")
+        .args(["-P", &child.id().to_string()])
+        .output()
+        .unwrap();
     let solver = String::from_utf8(pgrep.stdout).unwrap();
     let solver = solver.trim();
     assert!(!solver.is_empty(), "no solver process");
-    assert!(Command::new("kill").args(["-9", solver]).status().unwrap().success());
+    assert!(
+        Command::new("kill")
+            .args(["-9", solver])
+            .status()
+            .unwrap()
+            .success()
+    );
     // Generous: the proxy notices within 100 ms; this only catches a hang.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let status = loop {
@@ -908,13 +1010,22 @@ fn solver_death_ends_the_session_even_with_stdin_open() {
     // then pop below the base frame.
     let f = Fixture::new("death-framed");
     f.run(b"(push)(assert a)(check-sat)(pop)");
-    let code = solver_death_while_idle(&f, b"(push)(assert a)(check-sat)(pop)(pop)(echo \"ready\")\n");
+    let code = solver_death_while_idle(
+        &f,
+        b"(push)(assert a)(check-sat)(pop)(pop)(echo \"ready\")\n",
+    );
     assert_eq!(code, 137);
     // Raw bypass, and an ordinary caching session with a live solver.
     let f = Fixture::new("death-raw");
-    assert_eq!(solver_death_while_idle(&f, b"(reset)(echo \"ready\")\n"), 137);
+    assert_eq!(
+        solver_death_while_idle(&f, b"(reset)(echo \"ready\")\n"),
+        137
+    );
     let f = Fixture::new("death-cached");
-    assert_eq!(solver_death_while_idle(&f, b"(assert a)(check-sat)(echo \"ready\")\n"), 137);
+    assert_eq!(
+        solver_death_while_idle(&f, b"(assert a)(check-sat)(echo \"ready\")\n"),
+        137
+    );
 }
 
 /// A solver that stops reading must push back on the client through the
@@ -924,9 +1035,13 @@ fn input_is_not_buffered_without_limit_when_the_solver_stops_reading() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let stub = stub();
-    let mut child = proxy_command(&z3cache(), PROXY_ARGS, &[("Z3CACHE_REAL_Z3", stub.as_os_str())])
-        .spawn()
-        .unwrap();
+    let mut child = proxy_command(
+        &z3cache(),
+        PROXY_ARGS,
+        &[("Z3CACHE_REAL_Z3", stub.as_os_str())],
+    )
+    .spawn()
+    .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     // Enter raw bypass and wait until the solver is running.
@@ -935,8 +1050,14 @@ fn input_is_not_buffered_without_limit_when_the_solver_stops_reading() {
     let mut line = String::new();
     stdout.read_line(&mut line).unwrap();
     assert_eq!(line, "ready\n");
-    let ps = Command::new("pgrep").args(["-P", &child.id().to_string()]).output().unwrap();
-    let solver_pid: i32 = String::from_utf8_lossy(&ps.stdout).trim().parse().expect("solver pid");
+    let ps = Command::new("pgrep")
+        .args(["-P", &child.id().to_string()])
+        .output()
+        .unwrap();
+    let solver_pid: i32 = String::from_utf8_lossy(&ps.stdout)
+        .trim()
+        .parse()
+        .expect("solver pid");
     unsafe { libc::kill(solver_pid, libc::SIGSTOP) };
 
     // Offer 64 MiB of comments; the stopped solver reads none of it.
@@ -963,7 +1084,10 @@ fn input_is_not_buffered_without_limit_when_the_solver_stops_reading() {
     }
     let _ = child.wait();
     let _ = writer.join();
-    assert!(bounded, "proxy accepted {accepted} bytes while the solver read nothing");
+    assert!(
+        bounded,
+        "proxy accepted {accepted} bytes while the solver read nothing"
+    );
 }
 
 // Locks, gc, store policies, solver lifetime and audits.
@@ -1057,7 +1181,10 @@ fn audits_correct_contradictions_and_report_instability() {
     assert_eq!(out.text(), "sat\n");
     assert_eq!(f.counter("audit_contradictions"), 1);
     assert_eq!((f.counter("hits"), f.counter("misses")), (0, 2));
-    assert_eq!(f.cli(&["stats"]).text().lines().nth(1).unwrap(), "entries  0, 0.0 MB");
+    assert_eq!(
+        f.cli(&["stats"]).text().lines().nth(1).unwrap(),
+        "entries  0, 0.0 MB"
+    );
 
     // Instability: answered from the cache, entry kept.
     let f = Fixture::new("audit-unstable");
@@ -1090,7 +1217,10 @@ fn misses_take_a_lock_file_per_key() {
     let shards: Vec<_> = std::fs::read_dir(f.cache.join("locks")).unwrap().collect();
     assert_eq!(shards.len(), 1);
     let shard = shards[0].as_ref().unwrap().path();
-    let files: Vec<_> = std::fs::read_dir(&shard).unwrap().map(|e| e.unwrap().file_name()).collect();
+    let files: Vec<_> = std::fs::read_dir(&shard)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
     assert_eq!(files.len(), 1);
     let name = files[0].to_string_lossy().into_owned();
     assert_eq!(name.len(), 64);
@@ -1117,8 +1247,11 @@ fn gc_evicts_to_the_cap_and_cleans_old_locks() {
     // entries older than a day).
     {
         let conn = rusqlite::Connection::open(f.cache.join(FILE_NAME)).unwrap();
-        conn.execute("UPDATE entry SET last_used_s = strftime('%s', 'now') - 172800", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE entry SET last_used_s = strftime('%s', 'now') - 172800",
+            [],
+        )
+        .unwrap();
     }
     let recent = b"(declare-const x Int)\n(push)(assert (> x 299))(check-sat)(pop)\n";
     assert_eq!(f.run(recent).text(), "unsat\n");
@@ -1132,10 +1265,20 @@ fn gc_evicts_to_the_cap_and_cleans_old_locks() {
     let held_file = std::fs::File::create(&held).unwrap();
     {
         use std::os::fd::AsRawFd;
-        assert_eq!(unsafe { libc::flock(held_file.as_raw_fd(), libc::LOCK_EX) }, 0);
+        assert_eq!(
+            unsafe { libc::flock(held_file.as_raw_fd(), libc::LOCK_EX) },
+            0
+        );
     }
     for p in [&stale, &held] {
-        assert!(Command::new("touch").args(["-t", "202001010000"]).arg(p).status().unwrap().success());
+        assert!(
+            Command::new("touch")
+                .args(["-t", "202001010000"])
+                .arg(p)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
     let gc = run(
         &z3cache(),
@@ -1227,7 +1370,10 @@ fn a_holder_whose_client_stops_reading_does_not_block_waiters() {
     input.extend_from_slice(b"(check-sat)\n");
     let answers = format!("gate:{}:unsat", gate.display());
     let mut holder = f
-        .command(&[("Z3STUB_LOG", holder_log.as_os_str()), ("Z3STUB_ANSWERS", OsStr::new(&answers))])
+        .command(&[
+            ("Z3STUB_LOG", holder_log.as_os_str()),
+            ("Z3STUB_ANSWERS", OsStr::new(&answers)),
+        ])
         .spawn()
         .unwrap();
     let mut holder_in = holder.stdin.take().unwrap();
@@ -1237,9 +1383,10 @@ fn a_holder_whose_client_stops_reading_does_not_block_waiters() {
         // Keep stdin open; never read stdout.
         std::thread::sleep(std::time::Duration::from_secs(300));
     });
-    wait_until("the holder has replayed and is solving under its lock", || {
-        file_contains(&holder_log, "(check-sat)")
-    });
+    wait_until(
+        "the holder has replayed and is solving under its lock",
+        || file_contains(&holder_log, "(check-sat)"),
+    );
     let (cache, stub) = (f.cache.clone(), f.stub.clone());
     let (wl, inp) = (waiter_log.clone(), input.clone());
     let waiter = std::thread::spawn(move || {
@@ -1255,7 +1402,9 @@ fn a_holder_whose_client_stops_reading_does_not_block_waiters() {
             std::time::Duration::from_secs(120),
         )
     });
-    wait_until("the waiter found the lock busy", || file_contains(&waiter_log, LOCK_BUSY));
+    wait_until("the waiter found the lock busy", || {
+        file_contains(&waiter_log, LOCK_BUSY)
+    });
     std::fs::write(&gate, b"").unwrap();
     let waiter = waiter.join().unwrap();
     let _ = holder.kill();
@@ -1273,9 +1422,14 @@ fn a_stopped_holder_delays_waiters_only_up_to_the_limit() {
     let gate = f.log.parent().unwrap().join("never-opened");
     let input = b"(assert a)\n(check-sat)\n";
     let answers = format!("gate:{}:unsat", gate.display());
-    let mut holder = f.command(&[("Z3STUB_ANSWERS", OsStr::new(&answers))]).spawn().unwrap();
+    let mut holder = f
+        .command(&[("Z3STUB_ANSWERS", OsStr::new(&answers))])
+        .spawn()
+        .unwrap();
     holder.stdin.as_mut().unwrap().write_all(input).unwrap();
-    wait_until("the holder is solving under its lock", || file_contains(&f.log, "(check-sat)"));
+    wait_until("the holder is solving under its lock", || {
+        file_contains(&f.log, "(check-sat)")
+    });
     unsafe { libc::kill(holder.id() as i32, libc::SIGSTOP) };
     let start = std::time::Instant::now();
     let waiter = run_bounded(
@@ -1317,7 +1471,12 @@ fn numeric_settings_out_of_range_only_warn() {
         ],
     );
     assert_eq!((out.text().as_str(), out.code), ("unsat\n", 0));
-    for name in ["Z3CACHE_LOCK_WAIT", "Z3CACHE_VERIFY", "Z3CACHE_MAX_SIZE", "Z3CACHE_GC_EVERY"] {
+    for name in [
+        "Z3CACHE_LOCK_WAIT",
+        "Z3CACHE_VERIFY",
+        "Z3CACHE_MAX_SIZE",
+        "Z3CACHE_GC_EVERY",
+    ] {
         assert!(file_contains(&log, &format!("invalid {name}")), "{name}");
     }
 }
@@ -1341,5 +1500,9 @@ fn error_shaped_echo_is_data() {
     let mut framed = b"(push)(assert a)(check-sat)(pop)(pop)\n".to_vec();
     framed.extend_from_slice(echo);
     let out = f.run(&framed);
-    assert!(out.text().ends_with("(error \"hello\")\n"), "{}", out.text());
+    assert!(
+        out.text().ends_with("(error \"hello\")\n"),
+        "{}",
+        out.text()
+    );
 }

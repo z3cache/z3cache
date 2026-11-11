@@ -23,7 +23,11 @@ impl Session<'_> {
 
     /// Switches to raw bypass. The bytes for the solver start with the
     /// trigger, the command that caused it, if there is one.
-    pub(super) fn raw_bypass(&mut self, reason: String, trigger: Option<Command>) -> Result<Next, Stop> {
+    pub(super) fn raw_bypass(
+        &mut self,
+        reason: String,
+        trigger: Option<Command>,
+    ) -> Result<Next, Stop> {
         if self.phase == Phase::Caching {
             self.start_bypass(reason)?;
         }
@@ -40,7 +44,11 @@ impl Session<'_> {
     /// Leaves caching for bypass, framed if the client has been given an
     /// `rlimit-count` ahead of the solver's, which raw bypass could let go
     /// back (rule 7). The trigger and its class are forwarded first.
-    pub(super) fn framed_bypass(&mut self, reason: &str, trigger: Option<(Command, Class)>) -> Result<Next, Stop> {
+    pub(super) fn framed_bypass(
+        &mut self,
+        reason: &str,
+        trigger: Option<(Command, Class)>,
+    ) -> Result<Next, Stop> {
         self.start_bypass(reason.to_string())?;
         let offset = self.rlimit_offset()?;
         if offset == 0 {
@@ -67,7 +75,12 @@ impl Session<'_> {
     /// solver unchanged, and each response is framed by a sentinel so that a
     /// statistics response can be recognised by the command that asked for
     /// it and have `offset` added to its `rlimit-count`.
-    pub(super) fn forward(&mut self, cmd: &Command, class: &Class, offset: u64) -> Result<Next, Stop> {
+    pub(super) fn forward(
+        &mut self,
+        cmd: &Command,
+        class: &Class,
+        offset: u64,
+    ) -> Result<Next, Stop> {
         let output = match class {
             Class::Silent | Class::Push(_) | Class::Pop(_) | Class::SetOption { .. } => {
                 self.write_solver(&cmd.raw)?;

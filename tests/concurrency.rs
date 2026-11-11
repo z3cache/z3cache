@@ -33,7 +33,9 @@ fn spawn(cache: &Path, log: &Path, input: &[u8], extra: &[(&str, &OsStr)]) -> Ch
 
 fn integrity_ok(cache: &Path) {
     let conn = rusqlite::Connection::open(cache.join(FILE_NAME)).unwrap();
-    let r: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+    let r: String = conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(r, "ok");
 }
 
@@ -48,16 +50,28 @@ fn concurrent_misses_on_one_key_are_solved_once() {
     let gate = dir.join("gate");
     let input = b"(assert a)\n(check-sat)\n";
     let answer = format!("gate:{}:unsat", gate.display());
-    let holder = spawn(&cache, &log, input, &[("Z3STUB_ANSWERS", OsStr::new(&answer))]);
-    wait_until("the holder is solving under its lock", || file_contains(&log, "(check-sat)"));
+    let holder = spawn(
+        &cache,
+        &log,
+        input,
+        &[("Z3STUB_ANSWERS", OsStr::new(&answer))],
+    );
+    wait_until("the holder is solving under its lock", || {
+        file_contains(&log, "(check-sat)")
+    });
     let waiters: Vec<(Child, std::path::PathBuf)> = (0..7)
         .map(|i| {
             let wlog = dir.join(format!("waiter{i}.log"));
-            (spawn(&cache, &log, input, &[("Z3CACHE_LOG", wlog.as_os_str())]), wlog)
+            (
+                spawn(&cache, &log, input, &[("Z3CACHE_LOG", wlog.as_os_str())]),
+                wlog,
+            )
         })
         .collect();
     wait_until("every waiter found the lock busy", || {
-        waiters.iter().all(|(_, wlog)| file_contains(wlog, LOCK_BUSY))
+        waiters
+            .iter()
+            .all(|(_, wlog)| file_contains(wlog, LOCK_BUSY))
     });
     std::fs::write(&gate, b"").unwrap();
     let mut children = vec![holder];
@@ -103,10 +117,19 @@ fn killing_sessions_mid_write_leaves_a_valid_store() {
     let cache = dir.join("cache");
     let log = dir.join("stub.log");
     // Create the store first so that kills land during entry writes.
-    spawn(&cache, &log, &many_queries(0, 1), &[]).wait().unwrap();
+    spawn(&cache, &log, &many_queries(0, 1), &[])
+        .wait()
+        .unwrap();
     for round in 0..3 {
         let mut children: Vec<Child> = (0..8)
-            .map(|i| spawn(&cache, &log, &many_queries(1000 * (round * 8 + i), 300), &[]))
+            .map(|i| {
+                spawn(
+                    &cache,
+                    &log,
+                    &many_queries(1000 * (round * 8 + i), 300),
+                    &[],
+                )
+            })
             .collect();
         for (i, c) in children.iter_mut().enumerate() {
             std::thread::sleep(Duration::from_millis(5 + 7 * i as u64));
@@ -133,7 +156,9 @@ fn gc_while_sessions_run() {
     let dir = temp_dir("gc-concurrent");
     let cache = dir.join("cache");
     let log = dir.join("stub.log");
-    spawn(&cache, &log, &many_queries(0, 1), &[]).wait().unwrap();
+    spawn(&cache, &log, &many_queries(0, 1), &[])
+        .wait()
+        .unwrap();
     let small = ("Z3CACHE_MAX_SIZE", OsStr::new("96K"));
     let children: Vec<Child> = (0..6)
         .map(|i| spawn(&cache, &log, &many_queries(1000 * i, 200), &[small]))
@@ -144,7 +169,12 @@ fn gc_while_sessions_run() {
     let mut pending: Vec<Child> = children;
     while !pending.is_empty() {
         assert!(Instant::now() < deadline, "sessions did not finish");
-        let gc = run(&z3cache(), &["gc"], b"", &[("Z3CACHE_DIR", cache.as_os_str()), small]);
+        let gc = run(
+            &z3cache(),
+            &["gc"],
+            b"",
+            &[("Z3CACHE_DIR", cache.as_os_str()), small],
+        );
         assert_eq!(gc.code, 0, "{}", gc.text());
         gcs += 1;
         let mut still = Vec::new();
@@ -163,9 +193,17 @@ fn gc_while_sessions_run() {
         assert_eq!(String::from_utf8_lossy(&out.stdout), "unsat\n".repeat(200));
     }
     integrity_ok(&cache);
-    let gc = run(&z3cache(), &["gc"], b"", &[("Z3CACHE_DIR", cache.as_os_str()), small]);
+    let gc = run(
+        &z3cache(),
+        &["gc"],
+        b"",
+        &[("Z3CACHE_DIR", cache.as_os_str()), small],
+    );
     assert_eq!(gc.code, 0);
-    let bytes = SqliteStore::open_read_only(&cache).unwrap().db_bytes().unwrap();
+    let bytes = SqliteStore::open_read_only(&cache)
+        .unwrap()
+        .db_bytes()
+        .unwrap();
     assert!(bytes <= 96 * 1024, "{bytes} bytes after gc");
 }
 
@@ -181,8 +219,15 @@ fn hits_found_after_waiting_for_a_lock_are_audited_too() {
     let wlog = dir.join("waiter.log");
     let input = b"(assert a)\n(check-sat)\n";
     let answer = format!("gate:{}:unsat", gate.display());
-    let holder = spawn(&cache, &log, input, &[("Z3STUB_ANSWERS", OsStr::new(&answer))]);
-    wait_until("the holder is solving under its lock", || file_contains(&log, "(check-sat)"));
+    let holder = spawn(
+        &cache,
+        &log,
+        input,
+        &[("Z3STUB_ANSWERS", OsStr::new(&answer))],
+    );
+    wait_until("the holder is solving under its lock", || {
+        file_contains(&log, "(check-sat)")
+    });
     let waiter = spawn(
         &cache,
         &log,
@@ -193,12 +238,18 @@ fn hits_found_after_waiting_for_a_lock_are_audited_too() {
             ("Z3CACHE_LOG", wlog.as_os_str()),
         ],
     );
-    wait_until("the waiter found the lock busy", || file_contains(&wlog, LOCK_BUSY));
+    wait_until("the waiter found the lock busy", || {
+        file_contains(&wlog, LOCK_BUSY)
+    });
     std::fs::write(&gate, b"").unwrap();
     let w = waiter.wait_with_output().unwrap();
     let h = holder.wait_with_output().unwrap();
     assert_eq!(String::from_utf8_lossy(&h.stdout), "unsat\n");
-    assert_eq!(String::from_utf8_lossy(&w.stdout), "sat\n", "the audit's answer");
+    assert_eq!(
+        String::from_utf8_lossy(&w.stdout),
+        "sat\n",
+        "the audit's answer"
+    );
     assert_eq!(counter(&cache, "lock_waits"), 1);
     assert_eq!(counter(&cache, "audits"), 1);
     assert_eq!(counter(&cache, "audit_contradictions"), 1);

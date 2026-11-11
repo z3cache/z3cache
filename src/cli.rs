@@ -21,7 +21,9 @@ use crate::store::{FILE_NAME, SolverStamp, SqliteStore, Store, day, now_s, u64_t
 pub const SUBCOMMANDS: &[&str] = &["analyze", "clear", "doctor", "gc", "help", "stats"];
 
 pub fn is_subcommand(arg: &OsString) -> bool {
-    SUBCOMMANDS.iter().any(|s| arg.as_encoded_bytes() == s.as_bytes())
+    SUBCOMMANDS
+        .iter()
+        .any(|s| arg.as_encoded_bytes() == s.as_bytes())
 }
 
 const USAGE: &str = "\
@@ -39,7 +41,10 @@ Invoked with z3's arguments (or as `z3`), z3cache acts as the solver.
 /// Runs a subcommand and returns the exit code. `args[0]` is the subcommand.
 pub fn run(args: &[OsString]) -> i32 {
     let sub = args[0].to_string_lossy();
-    let rest: Vec<String> = args[1..].iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let rest: Vec<String> = args[1..]
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     match &*sub {
         "analyze" => analyze_cmd(&args[1..]),
         "stats" => match rest.as_slice() {
@@ -83,7 +88,9 @@ fn analyze_cmd(dirs: &[OsString]) -> i32 {
 }
 
 fn cache_dir(cfg: &Config) -> Result<&Path, String> {
-    cfg.dir.as_deref().ok_or_else(|| "no cache directory: set Z3CACHE_DIR".to_string())
+    cfg.dir
+        .as_deref()
+        .ok_or_else(|| "no cache directory: set Z3CACHE_DIR".to_string())
 }
 
 fn store_exists(dir: &Path) -> bool {
@@ -172,7 +179,10 @@ fn json_period(m: &BTreeMap<String, i64>) -> String {
     }
     let bypass: Vec<String> = m
         .iter()
-        .filter_map(|(k, v)| k.strip_prefix("bypass: ").map(|r| format!("{}: {v}", json_str(r))))
+        .filter_map(|(k, v)| {
+            k.strip_prefix("bypass: ")
+                .map(|r| format!("{}: {v}", json_str(r)))
+        })
         .collect();
     parts.push(format!("\"bypass_reasons\": {{{}}}", bypass.join(", ")));
     format!("{{{}}}", parts.join(", "))
@@ -185,7 +195,10 @@ fn stats(json: bool) -> i32 {
     };
     if !store_exists(dir) {
         if json {
-            println!("{{\"path\": {}, \"entries\": 0, \"bytes\": 0}}", json_str(&dir.join(FILE_NAME).display().to_string()));
+            println!(
+                "{{\"path\": {}, \"entries\": 0, \"bytes\": 0}}",
+                json_str(&dir.join(FILE_NAME).display().to_string())
+            );
         } else {
             println!("no cache yet in {}", dir.display());
         }
@@ -222,7 +235,11 @@ fn stats(json: bool) -> i32 {
     let mut o = String::new();
     let _ = writeln!(o, "cache    {}", store.path().display());
     let _ = writeln!(o, "entries  {entries}, {}", mb(bytes));
-    let _ = writeln!(o, "\n{:<34} {:>12} {:>12} {:>12}", "", "today", "7 days", "all time");
+    let _ = writeln!(
+        o,
+        "\n{:<34} {:>12} {:>12} {:>12}",
+        "", "today", "7 days", "all time"
+    );
     let cell = |m: &BTreeMap<String, i64>, name: &str| {
         let n = m.get(name).copied().unwrap_or(0);
         if name == "saved_us" {
@@ -313,10 +330,16 @@ fn gc() -> i32 {
     };
     let cap = cfg.max_size;
     println!("cache    {}", store.path().display());
-    println!("cap      {} (Z3CACHE_MAX_SIZE); eviction goes down to 80%", mb(cap));
+    println!(
+        "cap      {} (Z3CACHE_MAX_SIZE); eviction goes down to 80%",
+        mb(cap)
+    );
     let deleted = match store.evict(cap) {
         Ok(e) if e.deleted == 0 => {
-            println!("store    {}, within the cap: nothing evicted", mb(e.bytes_before));
+            println!(
+                "store    {}, within the cap: nothing evicted",
+                mb(e.bytes_before)
+            );
             0
         }
         Ok(e) => {
@@ -384,8 +407,15 @@ fn doctor() -> i32 {
                 println!("cache dir     {} (writable)", dir.display());
                 match SqliteStore::open(dir) {
                     Ok(mut s) => {
-                        let n = s.count().map(|n| n.to_string()).unwrap_or_else(|e| format!("? ({e})"));
-                        println!("store         {}: {n} entries, {}", s.path().display(), mb(s.file_bytes()));
+                        let n = s
+                            .count()
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|e| format!("? ({e})"));
+                        println!(
+                            "store         {}: {n} entries, {}",
+                            s.path().display(),
+                            mb(s.file_bytes())
+                        );
                         store = Some(s);
                     }
                     Err(e) => {
@@ -407,14 +437,20 @@ fn doctor() -> i32 {
             .and_then(|st| store.as_mut().and_then(|s| s.solver(&st).ok().flatten()));
         match memo {
             Some(info) => {
-                println!("identity      {} (memoised)", blake3::Hash::from(info.id).to_hex());
+                println!(
+                    "identity      {} (memoised)",
+                    blake3::Hash::from(info.id).to_hex()
+                );
                 match info.version_response {
                     Some(v) => println!("version       {}", String::from_utf8_lossy(&v).trim()),
                     None => println!("version       not seen yet"),
                 }
             }
             None => match hash_executable(real) {
-                Ok(id) => println!("identity      {} (not memoised yet)", blake3::Hash::from(id).to_hex()),
+                Ok(id) => println!(
+                    "identity      {} (not memoised yet)",
+                    blake3::Hash::from(id).to_hex()
+                ),
                 Err(e) => {
                     println!("identity      CANNOT HASH: {e}");
                     ok = false;
@@ -472,7 +508,11 @@ fn round_trip(real: &Path) -> Result<String, String> {
     let starts = || -> Result<i64, String> {
         let mut s = SqliteStore::open(&dir).map_err(|e| e.to_string())?;
         let rows = s.counters().map_err(|e| e.to_string())?;
-        Ok(rows.iter().filter(|r| r.1 == "solver_starts").map(|r| r.2).sum())
+        Ok(rows
+            .iter()
+            .filter(|r| r.1 == "solver_starts")
+            .map(|r| r.2)
+            .sum())
     };
     let result = (|| {
         let (cold, cold_ms) = run()?;
@@ -486,7 +526,9 @@ fn round_trip(real: &Path) -> Result<String, String> {
             return Err(format!("cold run started {after_cold} solvers, expected 1"));
         }
         if after_warm != after_cold {
-            return Err("warm run started a solver: the answer was not served from the cache".into());
+            return Err(
+                "warm run started a solver: the answer was not served from the cache".into(),
+            );
         }
         Ok(format!(
             "cold {cold_ms:.1} ms (solver started), warm {warm_ms:.1} ms (answered from the cache, no solver started)"

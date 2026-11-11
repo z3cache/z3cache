@@ -122,13 +122,17 @@ impl SqliteStore {
     /// Bytes in pages that hold data (not on the free list).
     pub fn used_bytes(&self) -> Result<u64> {
         let pages: i64 = self.conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
-        let free: i64 = self.conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        let free: i64 = self
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
         let size: i64 = self.conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
         Ok(((pages - free).max(0) * size) as u64)
     }
 
     fn user_version(&self) -> Result<i64> {
-        Ok(self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+        Ok(self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
 
     fn ensure_schema(&mut self) -> Result<()> {
@@ -205,7 +209,8 @@ impl Store for SqliteStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
-            let mut touch = tx.prepare_cached("UPDATE entry SET last_used_s = ?1 WHERE key = ?2")?;
+            let mut touch =
+                tx.prepare_cached("UPDATE entry SET last_used_s = ?1 WHERE key = ?2")?;
             for key in touched {
                 touch.execute(params![now, &key[..]])?;
             }
@@ -258,7 +263,9 @@ impl Store for SqliteStore {
     }
 
     fn count(&mut self) -> Result<u64> {
-        let n: i64 = self.conn.query_row("SELECT count(*) FROM entry", [], |r| r.get(0))?;
+        let n: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM entry", [], |r| r.get(0))?;
         Ok(n.max(0) as u64)
     }
 
@@ -269,7 +276,9 @@ impl Store for SqliteStore {
     }
 
     fn delete(&mut self, key: &Key) -> Result<bool> {
-        let n = self.conn.execute("DELETE FROM entry WHERE key = ?1", params![&key[..]])?;
+        let n = self
+            .conn
+            .execute("DELETE FROM entry WHERE key = ?1", params![&key[..]])?;
         Ok(n > 0)
     }
 
@@ -385,7 +394,10 @@ mod tests {
             s.put(&key, &entry(&big)).unwrap();
             // Older entries were used longer ago.
             s.conn
-                .execute("UPDATE entry SET last_used_s = ?1 WHERE key = ?2", params![i64::from(i), &key[..]])
+                .execute(
+                    "UPDATE entry SET last_used_s = ?1 WHERE key = ?2",
+                    params![i64::from(i), &key[..]],
+                )
                 .unwrap();
         }
         let size = s.db_bytes().unwrap();
@@ -400,7 +412,11 @@ mod tests {
         // The newest entry survived, the oldest did not.
         let mut newest = [0u8; 32];
         newest[..4].copy_from_slice(&399u32.to_le_bytes());
-        assert!(s.get(&newest).unwrap().is_some(), "{e:?} used {}", s.used_bytes().unwrap());
+        assert!(
+            s.get(&newest).unwrap().is_some(),
+            "{e:?} used {}",
+            s.used_bytes().unwrap()
+        );
         assert!(s.get(&[0u8; 32]).unwrap().is_none());
     }
 
@@ -408,8 +424,10 @@ mod tests {
     fn counters_accumulate() {
         let dir = temp("counters");
         let mut s = SqliteStore::open(&dir).unwrap();
-        s.finish(&[], &[("hits".into(), 2), ("misses".into(), 1)]).unwrap();
-        s.finish(&[], &[("hits".into(), 3), ("zero".into(), 0)]).unwrap();
+        s.finish(&[], &[("hits".into(), 2), ("misses".into(), 1)])
+            .unwrap();
+        s.finish(&[], &[("hits".into(), 3), ("zero".into(), 0)])
+            .unwrap();
         let c = s.counters().unwrap();
         let get = |name: &str| c.iter().find(|r| r.1 == name).map(|r| r.2);
         assert_eq!(get("hits"), Some(5));
@@ -478,9 +496,13 @@ mod tests {
         }
         assert!(SqliteStore::open_read_only(&dir).is_err());
         let raw = Connection::open(dir.join(FILE_NAME)).unwrap();
-        let v: i64 = raw.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let v: i64 = raw
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(v, 999);
-        let n: i64 = raw.query_row("SELECT count(*) FROM entry", [], |r| r.get(0)).unwrap();
+        let n: i64 = raw
+            .query_row("SELECT count(*) FROM entry", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1);
     }
 

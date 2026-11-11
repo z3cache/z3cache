@@ -25,7 +25,12 @@ pub fn stub() -> PathBuf {
 }
 
 pub fn corpus(name: &str) -> Vec<u8> {
-    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus").join(name)).unwrap()
+    std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/corpus")
+            .join(name),
+    )
+    .unwrap()
 }
 
 pub fn temp_dir(name: &str) -> PathBuf {
@@ -97,7 +102,12 @@ pub fn run_chunked(
         }
     });
     let mut stdout = Vec::new();
-    child.stdout.take().unwrap().read_to_end(&mut stdout).unwrap();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
     let status = child.wait().unwrap();
     writer.join().unwrap();
     Run {
@@ -121,7 +131,13 @@ pub fn launches(log: &Path) -> usize {
 pub fn rlimit_counts(out: &str) -> Vec<u64> {
     out.split(":rlimit-count ")
         .skip(1)
-        .map(|rest| rest.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap())
+        .map(|rest| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap()
+        })
         .collect()
 }
 
@@ -169,7 +185,10 @@ pub fn run_bounded(
 pub fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     while !cond() {
-        assert!(std::time::Instant::now() < deadline, "timed out waiting until {what}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting until {what}"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
@@ -185,7 +204,10 @@ pub const LOCK_BUSY: &str = "in-flight lock busy";
 
 /// An all-time counter of the store in `cache`.
 pub fn counter(cache: &Path, name: &str) -> i64 {
-    let rows = SqliteStore::open_read_only(cache).unwrap().counters().unwrap();
+    let rows = SqliteStore::open_read_only(cache)
+        .unwrap()
+        .counters()
+        .unwrap();
     rows.iter().filter(|r| r.1 == name).map(|r| r.2).sum()
 }
 
@@ -247,7 +269,6 @@ pub fn normalize(out: &str) -> String {
     }
     o
 }
-
 
 /// Like [`run`], but returns `None` instead of hanging if `bin` has not
 /// exited within `limit` (it is then killed). Waits on the exit itself, not

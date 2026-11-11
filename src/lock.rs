@@ -41,7 +41,11 @@ fn key_path(cache_dir: &Path, key: &Key) -> PathBuf {
 /// Opens a lock file, creating it and its directory if needed.
 fn open_lock_file(path: &Path) -> std::io::Result<File> {
     fs::create_dir_all(path.parent().expect("lock path has a parent"))?;
-    OpenOptions::new().create(true).truncate(false).write(true).open(path)
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
 }
 
 /// The result of [`acquire`].
@@ -59,7 +63,12 @@ pub enum Acquired {
 /// `max_wait`. `on_busy` is called once, the first time the lock is found
 /// held by someone else (the session logs it). In every case but
 /// [`Acquired::Lock`] the caller solves without the lock.
-pub fn acquire(cache_dir: &Path, key: &Key, max_wait: Duration, mut on_busy: impl FnMut()) -> Acquired {
+pub fn acquire(
+    cache_dir: &Path,
+    key: &Key,
+    max_wait: Duration,
+    mut on_busy: impl FnMut(),
+) -> Acquired {
     let path = key_path(cache_dir, key);
     let file = match open_lock_file(&path) {
         Ok(f) => f,
@@ -150,7 +159,10 @@ pub fn clean(cache_dir: &Path, older_than: Duration) -> Cleaned {
 
 /// Opens an existing lock file and takes its lock without waiting.
 fn lock_existing(path: &Path) -> Result<File, TryLockError> {
-    let file = OpenOptions::new().write(true).open(path).map_err(TryLockError::Error)?;
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(TryLockError::Error)?;
     file.try_lock()?;
     Ok(file)
 }
@@ -185,7 +197,9 @@ mod tests {
         let (busy_tx, busy) = std::sync::mpsc::channel();
         let d = dir.clone();
         let waiter = std::thread::spawn(move || {
-            match acquire(&d, &key, Duration::from_secs(60), || busy_tx.send(()).unwrap()) {
+            match acquire(&d, &key, Duration::from_secs(60), || {
+                busy_tx.send(()).unwrap()
+            }) {
                 Acquired::Lock(l) => l.waited,
                 _ => panic!("no lock"),
             }
@@ -218,8 +232,14 @@ mod tests {
         assert_eq!(busy, 1, "reported once");
         // The bound is the point here; the upper limit only has to catch an
         // unbounded wait.
-        assert!(took >= Duration::from_millis(300) && took < Duration::from_secs(30), "{took:?}");
-        assert!(matches!(acquire(&dir, &key, Duration::ZERO, || {}), Acquired::TimedOut));
+        assert!(
+            took >= Duration::from_millis(300) && took < Duration::from_secs(30),
+            "{took:?}"
+        );
+        assert!(matches!(
+            acquire(&dir, &key, Duration::ZERO, || {}),
+            Acquired::TimedOut
+        ));
     }
 
     #[test]
@@ -227,7 +247,10 @@ mod tests {
         let dir = temp("unusable");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("locks"), b"not a directory").unwrap();
-        assert!(matches!(acquire(&dir, &[1; 32], Duration::from_secs(1), || {}), Acquired::Unavailable));
+        assert!(matches!(
+            acquire(&dir, &[1; 32], Duration::from_secs(1), || {}),
+            Acquired::Unavailable
+        ));
     }
 
     #[test]
@@ -239,7 +262,14 @@ mod tests {
         assert_eq!(clean(&dir, Duration::from_secs(3600)), Cleaned::default());
         // Everything is old: the unheld file goes, the held one stays.
         let c = clean(&dir, Duration::ZERO);
-        assert_eq!(c, Cleaned { removed: 1, held: 1, failed: 0 });
+        assert_eq!(
+            c,
+            Cleaned {
+                removed: 1,
+                held: 1,
+                failed: 0
+            }
+        );
         assert!(key_path(&dir, &[1; 32]).exists());
         assert!(!key_path(&dir, &[2; 32]).exists());
         drop(held);
@@ -254,7 +284,14 @@ mod tests {
         fs::create_dir_all(dangling.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(dir.join("missing"), &dangling).unwrap();
         let c = clean(&dir, Duration::ZERO);
-        assert_eq!(c, Cleaned { removed: 1, held: 0, failed: 1 });
+        assert_eq!(
+            c,
+            Cleaned {
+                removed: 1,
+                held: 0,
+                failed: 1
+            }
+        );
     }
 
     #[test]

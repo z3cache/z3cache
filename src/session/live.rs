@@ -94,7 +94,9 @@ impl Session<'_> {
     /// client's.
     pub(super) fn materialize(&mut self) -> Result<(), Stop> {
         if self.cfg.mode == Mode::Enforce {
-            let msg = self.profile.error_line("z3cache: cache miss in enforce mode");
+            let msg = self
+                .profile
+                .error_line("z3cache: cache miss in enforce mode");
             let _ = self.write_client(&msg);
             log!("enforce: cache miss");
             return Err(Stop(1));
@@ -118,7 +120,11 @@ impl Session<'_> {
         match Channel::spawn(self.real, self.args, self.framing.clone()) {
             Ok(channel) => {
                 self.counts.solver_starts += 1;
-                self.live = Some(Live { channel, sent: vec![0], options: BTreeMap::new() });
+                self.live = Some(Live {
+                    channel,
+                    sent: vec![0],
+                    options: BTreeMap::new(),
+                });
                 Ok(())
             }
             Err(e) => {
@@ -155,7 +161,10 @@ impl Session<'_> {
         // answer under the wrong settings.
         let replayed = batch.len();
         if live.sync_options(&self.state, &mut batch) {
-            log!("option drift: {}", String::from_utf8_lossy(&batch[replayed..]).trim_end());
+            log!(
+                "option drift: {}",
+                String::from_utf8_lossy(&batch[replayed..]).trim_end()
+            );
         }
         if !batch.is_empty() || !sections.is_empty() {
             sections.push(Section::lines(batch, Output::Response));
@@ -188,7 +197,10 @@ impl Session<'_> {
     /// Buffers bytes for the live solver, which reads them with the next
     /// exchange. Ends the session if the solver has gone away.
     pub(super) fn write_solver(&mut self, bytes: &[u8]) -> Result<(), Stop> {
-        let live = self.live.as_mut().expect("write_solver needs a live solver");
+        let live = self
+            .live
+            .as_mut()
+            .expect("write_solver needs a live solver");
         live.channel.write(bytes).map_err(|gone| self.gone(gone))
     }
 
@@ -218,7 +230,10 @@ impl Session<'_> {
         };
         if reply.output.passed_on() {
             if !self.errored {
-                log!("solver reported an error: {}", String::from_utf8_lossy(line));
+                log!(
+                    "solver reported an error: {}",
+                    String::from_utf8_lossy(line)
+                );
             }
             self.errored = true;
         }

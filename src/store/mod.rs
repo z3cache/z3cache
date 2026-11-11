@@ -7,8 +7,8 @@ mod sqlite;
 
 use std::path::Path;
 
-pub use sqlite::{FILE_NAME, SqliteStore};
 pub(crate) use sqlite::u64_to_sql;
+pub use sqlite::{FILE_NAME, SqliteStore};
 
 pub type Key = [u8; 32];
 

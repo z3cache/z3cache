@@ -51,8 +51,15 @@ impl Counts {
 }
 
 /// What a session adds to the store's counters at exit.
-pub(super) fn session_counters(counts: &Counts, errored: bool, bypass: Option<&str>) -> Vec<(String, i64)> {
-    let mut counters = vec![("sessions".to_string(), 1), ("errored_sessions".to_string(), i64::from(errored))];
+pub(super) fn session_counters(
+    counts: &Counts,
+    errored: bool,
+    bypass: Option<&str>,
+) -> Vec<(String, i64)> {
+    let mut counters = vec![
+        ("sessions".to_string(), 1),
+        ("errored_sessions".to_string(), i64::from(errored)),
+    ];
     counters.extend(counts.named().map(|(name, n)| (name.to_string(), n)));
     if let Some(reason) = bypass {
         counters.push(("bypassed_sessions".into(), 1));
@@ -88,7 +95,10 @@ impl SessionStore {
                 None
             }
         };
-        SessionStore { store, writable: cfg.mode == Mode::Rw }
+        SessionStore {
+            store,
+            writable: cfg.mode == Mode::Rw,
+        }
     }
 
     pub(super) fn is_open(&self) -> bool {
@@ -155,7 +165,11 @@ impl SessionStore {
 }
 
 /// Finds the solver's identity, from the store if it has been seen before.
-pub(super) fn identify(real: &Path, stamp: Option<&SolverStamp>, store: &mut SessionStore) -> Option<SolverInfo> {
+pub(super) fn identify(
+    real: &Path,
+    stamp: Option<&SolverStamp>,
+    store: &mut SessionStore,
+) -> Option<SolverInfo> {
     if let Some(info) = stamp.and_then(|stamp| store.solver(stamp)) {
         return Some(info);
     }
@@ -166,7 +180,10 @@ pub(super) fn identify(real: &Path, stamp: Option<&SolverStamp>, store: &mut Ses
             return None;
         }
     };
-    let info = SolverInfo { id, version_response: None };
+    let info = SolverInfo {
+        id,
+        version_response: None,
+    };
     if let Some(stamp) = stamp {
         store.put_solver(stamp, &info);
     }
@@ -183,7 +200,10 @@ mod tests {
             if name.starts_with("bypass: ") {
                 continue;
             }
-            assert!(crate::cli::COUNTERS.iter().any(|(n, _)| *n == name), "{name} is not shown by stats");
+            assert!(
+                crate::cli::COUNTERS.iter().any(|(n, _)| *n == name),
+                "{name} is not shown by stats"
+            );
         }
     }
 }

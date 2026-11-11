@@ -98,7 +98,10 @@ fn number<T>(
 impl Config {
     pub fn from_env() -> Config {
         let mut warnings = Vec::new();
-        let mode = match non_empty("Z3CACHE_MODE").as_deref().and_then(|v| v.to_str()) {
+        let mode = match non_empty("Z3CACHE_MODE")
+            .as_deref()
+            .and_then(|v| v.to_str())
+        {
             None | Some("rw") => Mode::Rw,
             Some("ro") => Mode::Ro,
             Some("enforce") => Mode::Enforce,
@@ -112,7 +115,9 @@ impl Config {
             None | Some("unsat") => StorePolicy::Unsat,
             Some("all") => StorePolicy::All,
             Some(other) => {
-                warnings.push(format!("unknown Z3CACHE_STORE {other:?}; storing unsat only"));
+                warnings.push(format!(
+                    "unknown Z3CACHE_STORE {other:?}; storing unsat only"
+                ));
                 StorePolicy::Unsat
             }
         };
@@ -132,7 +137,13 @@ impl Config {
             DEFAULT_MAX_SIZE,
             format!("using {}G", DEFAULT_MAX_SIZE >> 30),
         );
-        let verify = number(w, "Z3CACHE_VERIFY", parse_fraction, 0.0, "auditing nothing".into());
+        let verify = number(
+            w,
+            "Z3CACHE_VERIFY",
+            parse_fraction,
+            0.0,
+            "auditing nothing".into(),
+        );
         let lock_wait = number(
             w,
             "Z3CACHE_LOCK_WAIT",
@@ -140,12 +151,19 @@ impl Config {
             DEFAULT_LOCK_WAIT,
             format!("using {} seconds", DEFAULT_LOCK_WAIT.as_secs()),
         );
-        let gc_every =
-            number(w, "Z3CACHE_GC_EVERY", parse_count, DEFAULT_GC_EVERY, format!("using {DEFAULT_GC_EVERY}"));
+        let gc_every = number(
+            w,
+            "Z3CACHE_GC_EVERY",
+            parse_count,
+            DEFAULT_GC_EVERY,
+            format!("using {DEFAULT_GC_EVERY}"),
+        );
         Config {
             real_z3: non_empty("Z3CACHE_REAL_Z3").map(PathBuf::from),
             mode,
-            dir: non_empty("Z3CACHE_DIR").map(PathBuf::from).or_else(default_dir),
+            dir: non_empty("Z3CACHE_DIR")
+                .map(PathBuf::from)
+                .or_else(default_dir),
             record: non_empty("Z3CACHE_RECORD").map(PathBuf::from),
             log: non_empty("Z3CACHE_LOG").map(PathBuf::from),
             solver_salt: env::var_os("Z3CACHE_SOLVER_SALT")
@@ -193,7 +211,9 @@ pub fn parse_count(text: &str) -> Option<u32> {
 pub fn parse_size(text: &str) -> Option<u64> {
     let t = text.trim();
     let upper = t.to_ascii_uppercase();
-    let unit_start = upper.find(|c: char| !c.is_ascii_digit()).unwrap_or(upper.len());
+    let unit_start = upper
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(upper.len());
     let (digits, unit) = upper.split_at(unit_start);
     let n: u64 = digits.parse().ok()?;
     let shift = match unit {
@@ -235,10 +255,16 @@ pub fn find_real_solver(cfg: &Config, profile: &dyn SolverProfile) -> Result<Pat
     };
     if let Some(p) = &cfg.real_z3 {
         if !is_executable(p) {
-            return Err(format!("Z3CACHE_REAL_Z3={} is not an executable file", p.display()));
+            return Err(format!(
+                "Z3CACHE_REAL_Z3={} is not an executable file",
+                p.display()
+            ));
         }
         if is_me(p) {
-            return Err(format!("Z3CACHE_REAL_Z3={} points at z3cache itself", p.display()));
+            return Err(format!(
+                "Z3CACHE_REAL_Z3={} points at z3cache itself",
+                p.display()
+            ));
         }
         return Ok(p.clone());
     }
@@ -271,7 +297,9 @@ mod tests {
         assert_eq!(parse_seconds("0"), Some(Duration::ZERO));
         assert_eq!(parse_seconds("0.5"), Some(Duration::from_millis(500)));
         assert_eq!(parse_seconds(" 2.25 "), Some(Duration::from_millis(2250)));
-        for bad in ["1e100", "1e20", "NaN", "nan", "inf", "-inf", "infinity", "-1", "-0.5", "", "abc", "1s"] {
+        for bad in [
+            "1e100", "1e20", "NaN", "nan", "inf", "-inf", "infinity", "-1", "-0.5", "", "abc", "1s",
+        ] {
             assert_eq!(parse_seconds(bad), None, "{bad}");
         }
     }

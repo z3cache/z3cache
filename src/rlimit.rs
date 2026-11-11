@@ -43,7 +43,9 @@ pub fn edit(lines: &mut [Vec<u8>], f: &dyn Fn(u64) -> u64) {
     };
     for l in &mut lines[start..] {
         if let Some((start, end)) = value_span(l)
-            && let Some(v) = std::str::from_utf8(&l[start..end]).ok().and_then(|s| s.parse::<u64>().ok())
+            && let Some(v) = std::str::from_utf8(&l[start..end])
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
         {
             l.splice(start..end, f(v).to_string().into_bytes());
         }
@@ -60,10 +62,13 @@ mod tests {
     use super::*;
 
     fn lines(s: &str) -> Vec<Vec<u8>> {
-        s.split_inclusive('\n').map(|l| l.as_bytes().to_vec()).collect()
+        s.split_inclusive('\n')
+            .map(|l| l.as_bytes().to_vec())
+            .collect()
     }
 
-    const REAL: &str = "(:max-memory   0.19\n :memory       0.19\n :num-allocs   451\n :rlimit-count 1234)\n";
+    const REAL: &str =
+        "(:max-memory   0.19\n :memory       0.19\n :num-allocs   451\n :rlimit-count 1234)\n";
 
     #[test]
     fn parse_and_edit() {
@@ -86,7 +91,10 @@ mod tests {
     fn edit_changes_only_the_statistics_response() {
         let mut l = lines(":rlimit-count 10\n(:max-memory 0.19\n :rlimit-count 10)\n");
         edit(&mut l, &|v| v + 5);
-        assert_eq!(l.concat(), b":rlimit-count 10\n(:max-memory 0.19\n :rlimit-count 15)\n");
+        assert_eq!(
+            l.concat(),
+            b":rlimit-count 10\n(:max-memory 0.19\n :rlimit-count 15)\n"
+        );
         let mut other = lines("unsat\n");
         edit(&mut other, &|v| v + 5);
         assert_eq!(other.concat(), b"unsat\n");

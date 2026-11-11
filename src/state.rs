@@ -338,9 +338,7 @@ mod tests {
                 Class::Query => state.append_query(cmd.canonical, b"unsat\n", Verdict::Unsat),
                 Class::Push(n) => state.push(n),
                 Class::Pop(n) => state.pop(n).unwrap(),
-                Class::SetOption { name, value } => {
-                    state.set_option(&name, &value, &cmd.canonical)
-                }
+                Class::SetOption { name, value } => state.set_option(&name, &value, &cmd.canonical),
                 _ => {}
             }
         }
@@ -357,9 +355,14 @@ mod tests {
         let base = "(declare-const x Int)(assert (> x 0))";
         assert_eq!(
             key(base),
-            key(&format!("{base}(push)(declare-const y Int)(assert (< x y))(check-sat)(pop)"))
+            key(&format!(
+                "{base}(push)(declare-const y Int)(assert (< x y))(check-sat)(pop)"
+            ))
         );
-        assert_eq!(key(base), key(&format!("{base}(push 2)(assert false)(pop 2)")));
+        assert_eq!(
+            key(base),
+            key(&format!("{base}(push 2)(assert false)(pop 2)"))
+        );
     }
 
     #[test]
@@ -367,7 +370,10 @@ mod tests {
         let ctx_src = "(declare-const x Int)";
         let f = "(push)(assert (> x 1))";
         let g = "(push)(assert (> x 2))(check-sat)(pop)";
-        assert_eq!(key(&format!("{ctx_src}{f}")), key(&format!("{ctx_src}{g}{f}")));
+        assert_eq!(
+            key(&format!("{ctx_src}{f}")),
+            key(&format!("{ctx_src}{g}{f}"))
+        );
     }
 
     #[test]
@@ -387,7 +393,10 @@ mod tests {
             key("(assert a)(set-option :rlimit 6)")
         );
         // A frame boundary is part of the path.
-        assert_ne!(key("(assert a)(assert b)"), key("(assert a)(push)(assert b)"));
+        assert_ne!(
+            key("(assert a)(assert b)"),
+            key("(assert a)(push)(assert b)")
+        );
     }
 
     #[test]
@@ -411,7 +420,10 @@ mod tests {
         // The parent's hash is unchanged...
         let mut fresh = State::new();
         run(&mut fresh, "(assert a)");
-        assert_eq!(st.frames[0].hasher.finalize(), fresh.frames[0].hasher.finalize());
+        assert_eq!(
+            st.frames[0].hasher.finalize(),
+            fresh.frames[0].hasher.finalize()
+        );
         // ...but its replay list carries the options still in effect.
         let replay: Vec<String> = st
             .replay(0)
@@ -516,7 +528,9 @@ mod tests {
             Op::Push(n) => st.push(*n),
             Op::Pop(n) => st.pop(*n).unwrap(),
             Op::Append(c) => st.append(c.as_bytes()),
-            Op::Query(c, r) => st.append_query(c.as_bytes(), r.as_bytes(), Verdict::of(r.as_bytes())),
+            Op::Query(c, r) => {
+                st.append_query(c.as_bytes(), r.as_bytes(), Verdict::of(r.as_bytes()))
+            }
             Op::SetOption(name, value) => {
                 let canonical = format!("(set-option :{name} {value})");
                 st.set_option(name.as_bytes(), value.as_bytes(), canonical.as_bytes());
@@ -533,7 +547,11 @@ mod tests {
     }
 
     fn gen_command(rng: &mut TestRng) -> String {
-        format!("(assert (> {} {}))", rng.pick(&["x", "y", "|a b|", "(f x)"]), rng.below(50))
+        format!(
+            "(assert (> {} {}))",
+            rng.pick(&["x", "y", "|a b|", "(f x)"]),
+            rng.below(50)
+        )
     }
 
     /// A random op sequence that stays within the frames it opens; options
@@ -558,13 +576,19 @@ mod tests {
                     *depth -= n;
                     ops.push(Op::Pop(n));
                 }
-                3 => ops.push(Op::Query("(check-sat)".into(), rng.pick(&["sat\n", "unsat\n", "unknown\n"]))),
+                3 => ops.push(Op::Query(
+                    "(check-sat)".into(),
+                    rng.pick(&["sat\n", "unsat\n", "unknown\n"]),
+                )),
                 4 if !restore.is_empty() => {
                     // Option values in the key come from the map; an
                     // option changed and then restored leaves it as it was.
                     let value = rng.below(5).to_string();
                     ops.push(Op::SetOption("smt.case_split", value));
-                    restore.last_mut().unwrap().push(Op::SetOption("smt.case_split", "0".into()));
+                    restore
+                        .last_mut()
+                        .unwrap()
+                        .push(Op::SetOption("smt.case_split", "0".into()));
                 }
                 _ => ops.push(Op::Append(gen_command(rng))),
             }
@@ -610,7 +634,11 @@ mod tests {
             assert_eq!(inner_depth, depth + n, "seed {seed}");
             st.pop(n).unwrap();
             assert_eq!(st.frame_count(), frames, "seed {seed}");
-            assert_eq!(st.hashes(&ctx(), b"(check-sat)"), before, "seed {seed}: {prefix:?} push {n} {inner:?} pop {n}");
+            assert_eq!(
+                st.hashes(&ctx(), b"(check-sat)"),
+                before,
+                "seed {seed}: {prefix:?} push {n} {inner:?} pop {n}"
+            );
         }
     }
 
@@ -651,13 +679,25 @@ mod tests {
                 mutated[i] = changed;
                 let other = state_of(&mutated).hashes(&ctx(), b"(check-sat)").key;
                 if on_path.contains(&i) {
-                    assert_ne!(other, key, "seed {seed}: changing op {i} ({op:?}) on the path kept the key");
+                    assert_ne!(
+                        other, key,
+                        "seed {seed}: changing op {i} ({op:?}) on the path kept the key"
+                    );
                 } else {
-                    assert_eq!(other, key, "seed {seed}: changing popped op {i} ({op:?}) changed the key");
+                    assert_eq!(
+                        other, key,
+                        "seed {seed}: changing popped op {i} ({op:?}) changed the key"
+                    );
                 }
             }
             // And the command being asked is part of the key.
-            assert_ne!(state_of(&ops).hashes(&ctx(), b"(check-sat-assuming (a))").key, key, "seed {seed}");
+            assert_ne!(
+                state_of(&ops)
+                    .hashes(&ctx(), b"(check-sat-assuming (a))")
+                    .key,
+                key,
+                "seed {seed}"
+            );
         }
     }
 }

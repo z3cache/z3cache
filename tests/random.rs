@@ -95,7 +95,11 @@ struct Gen {
 }
 
 fn int_lit(v: i64) -> String {
-    if v < 0 { format!("(- {})", -v) } else { v.to_string() }
+    if v < 0 {
+        format!("(- {})", -v)
+    } else {
+        v.to_string()
+    }
 }
 
 impl Gen {
@@ -126,7 +130,8 @@ impl Gen {
     /// Emits one command as given.
     fn emit_exact(&mut self, text: &str) {
         self.out.push_str(text);
-        self.out.push_str(if self.rng.chance(85) { "\n" } else { " " });
+        self.out
+            .push_str(if self.rng.chance(85) { "\n" } else { " " });
         self.last_sat = false;
     }
 
@@ -157,7 +162,11 @@ impl Gen {
     /// is applied only to constants, whose `f` values are pinned.
     fn int_term(&mut self, depth: u32, pinned: bool) -> (String, i64) {
         let ints = self.ints();
-        let choice = if depth == 0 { self.rng.below(2) } else { self.rng.below(7) };
+        let choice = if depth == 0 {
+            self.rng.below(2)
+        } else {
+            self.rng.below(7)
+        };
         match choice {
             0 => {
                 let v = self.rng.range(-4, 4);
@@ -218,8 +227,14 @@ impl Gen {
             _ => {
                 let (a, x) = self.int_term(depth - 1, pinned);
                 let (b, y) = self.int_term(depth - 1, pinned);
-                let ops: [(&str, bool); 6] =
-                    [("<", x < y), ("<=", x <= y), (">", x > y), (">=", x >= y), ("=", x == y), ("distinct", x != y)];
+                let ops: [(&str, bool); 6] = [
+                    ("<", x < y),
+                    ("<=", x <= y),
+                    (">", x > y),
+                    (">=", x >= y),
+                    ("=", x == y),
+                    ("distinct", x != y),
+                ];
                 let (op, v) = *self.rng.pick(&ops);
                 (format!("({op} {a} {b})"), v)
             }
@@ -251,7 +266,11 @@ impl Gen {
     }
 
     fn push(&mut self, n: usize) {
-        let cmd = if n == 1 && self.rng.chance(70) { "(push)".to_string() } else { format!("(push {n})") };
+        let cmd = if n == 1 && self.rng.chance(70) {
+            "(push)".to_string()
+        } else {
+            format!("(push {n})")
+        };
         self.emit(&cmd);
         for _ in 0..n {
             let top = Frame {
@@ -264,7 +283,11 @@ impl Gen {
     }
 
     fn pop(&mut self, n: usize) {
-        let cmd = if n == 1 && self.rng.chance(70) { "(pop)".to_string() } else { format!("(pop {n})") };
+        let cmd = if n == 1 && self.rng.chance(70) {
+            "(pop)".to_string()
+        } else {
+            format!("(pop {n})")
+        };
         self.emit(&cmd);
         for _ in 0..n {
             self.frames.pop();
@@ -350,7 +373,9 @@ impl Gen {
     }
 
     fn echo(&mut self) {
-        let pieces = ["a", "b c", "\"\"", "(", ")", ";", "|", "\\", " ", "x1", "<<DONE>>"];
+        let pieces = [
+            "a", "b c", "\"\"", "(", ")", ";", "|", "\\", " ", "x1", "<<DONE>>",
+        ];
         let mut s = String::new();
         for _ in 0..self.rng.below(5) {
             s.push_str(self.rng.pick(&pieces));
@@ -411,7 +436,9 @@ impl Gen {
             1 => format!("(>= (f y) (- y {}))", int_lit(k.abs())),
             _ => format!("(not (= (f y) {}))", int_lit(c - 100)),
         };
-        self.emit(&format!("(assert (forall ((y Int)) (! {body} :pattern ((f y)))))"));
+        self.emit(&format!(
+            "(assert (forall ((y Int)) (! {body} :pattern ((f y)))))"
+        ));
         self.frames.last_mut().unwrap().satisfiable = false;
     }
 
@@ -510,11 +537,26 @@ fn comparable(out: &str) -> String {
     o
 }
 
-fn describe(seed: u64, config: &str, pass: &str, session: &str, want: &Run, got: Option<&Run>) -> String {
+fn describe(
+    seed: u64,
+    config: &str,
+    pass: &str,
+    session: &str,
+    want: &Run,
+    got: Option<&Run>,
+) -> String {
     let mut s = String::new();
-    let _ = writeln!(s, "seed {seed}, {config}, {pass}: proxy output differs from Z3");
+    let _ = writeln!(
+        s,
+        "seed {seed}, {config}, {pass}: proxy output differs from Z3"
+    );
     let _ = writeln!(s, "--- session (Gen::session({seed}))\n{session}");
-    let _ = writeln!(s, "--- z3, exit {}\n{}", want.code, comparable(&want.text()));
+    let _ = writeln!(
+        s,
+        "--- z3, exit {}\n{}",
+        want.code,
+        comparable(&want.text())
+    );
     match got {
         Some(r) => {
             let _ = writeln!(s, "--- z3cache, exit {}\n{}", r.code, comparable(&r.text()));
@@ -528,18 +570,33 @@ fn describe(seed: u64, config: &str, pass: &str, session: &str, want: &Run, got:
 
 /// Runs every session through `z3cache` with one cache, cold then warm,
 /// and returns the first difference from Z3.
-fn run_config(z3: &Path, config: &str, extra: &[(&str, &str)], sessions: &[(String, Run)]) -> Option<String> {
+fn run_config(
+    z3: &Path,
+    config: &str,
+    extra: &[(&str, &str)],
+    sessions: &[(String, Run)],
+) -> Option<String> {
     let cache = temp_dir(&format!("random-{}", config.replace(' ', "-")));
-    let mut env = vec![("Z3CACHE_REAL_Z3", z3.as_os_str()), ("Z3CACHE_DIR", cache.as_os_str())];
+    let mut env = vec![
+        ("Z3CACHE_REAL_Z3", z3.as_os_str()),
+        ("Z3CACHE_DIR", cache.as_os_str()),
+    ];
     env.extend(extra.iter().map(|(k, v)| (*k, OsStr::new(v))));
     for pass in ["cold", "warm"] {
         for (seed, (session, want)) in sessions.iter().enumerate() {
             let got = run_within(&z3cache(), ARGS, session.as_bytes(), &env, LIMIT);
-            let same = got
-                .as_ref()
-                .is_some_and(|r| r.code == want.code && comparable(&r.text()) == comparable(&want.text()));
+            let same = got.as_ref().is_some_and(|r| {
+                r.code == want.code && comparable(&r.text()) == comparable(&want.text())
+            });
             if !same {
-                return Some(describe(seed as u64, config, pass, session, want, got.as_ref()));
+                return Some(describe(
+                    seed as u64,
+                    config,
+                    pass,
+                    session,
+                    want,
+                    got.as_ref(),
+                ));
             }
         }
     }
@@ -569,7 +626,9 @@ fn random_sessions_match_real_z3() {
     let sessions: Vec<String> = (0..n).map(Gen::session).collect();
 
     // Z3's own answers, in parallel.
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(8);
     let direct: Vec<Run> = std::thread::scope(|s| {
         let chunks: Vec<_> = sessions
             .chunks(sessions.len().div_ceil(threads))
@@ -579,8 +638,9 @@ fn random_sessions_match_real_z3() {
                     chunk
                         .iter()
                         .map(|session| {
-                            run_within(z3, ARGS, session.as_bytes(), &[], LIMIT)
-                                .unwrap_or_else(|| panic!("z3 did not finish within {LIMIT:?}:\n{session}"))
+                            run_within(z3, ARGS, session.as_bytes(), &[], LIMIT).unwrap_or_else(
+                                || panic!("z3 did not finish within {LIMIT:?}:\n{session}"),
+                            )
                         })
                         .collect::<Vec<_>>()
                 })
@@ -606,7 +666,10 @@ fn random_sessions_match_real_z3() {
         "{n} sessions: {} sat, {} unsat, {} unknown answers; {errored} sessions with errors",
         verdicts[0], verdicts[1], verdicts[2]
     );
-    assert!(verdicts.iter().all(|&v| v > 0), "the generator should give every verdict");
+    assert!(
+        verdicts.iter().all(|&v| v > 0),
+        "the generator should give every verdict"
+    );
 
     // Each configuration has its own cache; they run side by side.
     let configs: [(&str, &[(&str, &str)]); 3] = [
@@ -638,9 +701,14 @@ fn get_value_echoes_the_terms_as_written() {
         return;
     };
     let cache = temp_dir("get-value-text");
-    let env = [("Z3CACHE_REAL_Z3", z3.as_os_str()), ("Z3CACHE_DIR", cache.as_os_str())];
+    let env = [
+        ("Z3CACHE_REAL_Z3", z3.as_os_str()),
+        ("Z3CACHE_DIR", cache.as_os_str()),
+    ];
     let session = |term: &str| {
-        format!("(declare-const x Int)(assert (= x 1))(push)(assert (> x 0))(check-sat)(get-value ({term}))(pop)")
+        format!(
+            "(declare-const x Int)(assert (= x 1))(push)(assert (> x 0))(check-sat)(get-value ({term}))(pop)"
+        )
     };
     for term in ["(+ x 1)", "(+  x   1)", "(+ x ; one\n 1)"] {
         let input = session(term);

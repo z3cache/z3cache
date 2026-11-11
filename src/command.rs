@@ -14,7 +14,10 @@ pub enum Class {
     Pop(u64),
     /// `set-option` of an allowlisted option: the name as written, without
     /// the leading `:`, and the value in canonical form.
-    SetOption { name: Vec<u8>, value: Vec<u8> },
+    SetOption {
+        name: Vec<u8>,
+        value: Vec<u8>,
+    },
     /// `echo` and `get-info :version`: answerable without a solver.
     Local,
     /// `get-info :all-statistics`.
@@ -178,7 +181,10 @@ mod tests {
             }
         );
         // Not on the allowlist, including other spellings of allowed ones.
-        assert_eq!(class("(set-option :RLimit 100)"), Class::Bypass("option :RLimit".into()));
+        assert_eq!(
+            class("(set-option :RLimit 100)"),
+            Class::Bypass("option :RLimit".into())
+        );
         assert_eq!(
             class("(set-option :global-decls true)"),
             Class::Bypass("option :global-decls".into())
@@ -205,7 +211,14 @@ mod tests {
 
     #[test]
     fn unknown_commands_bypass() {
-        for src in ["(reset)", "(get-proof)", "(simplify x)", "(apply tactic)", "()", "((a))"] {
+        for src in [
+            "(reset)",
+            "(get-proof)",
+            "(simplify x)",
+            "(apply tactic)",
+            "()",
+            "((a))",
+        ] {
             assert!(is_bypass(class(src)), "{src}");
         }
     }

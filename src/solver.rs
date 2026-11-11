@@ -184,9 +184,10 @@ static CHILDREN: [AtomicI32; 8] = [const { AtomicI32::new(0) }; 8];
 
 /// Adds a pid to [`CHILDREN`]. Returns false if there was no free slot.
 fn register(pid: i32) -> bool {
-    let free = CHILDREN
-        .iter()
-        .any(|slot| slot.compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst).is_ok());
+    let free = CHILDREN.iter().any(|slot| {
+        slot.compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    });
     if !free {
         crate::log!("no slot to track solver {pid}; a signal will not kill it");
     }
@@ -233,7 +234,9 @@ mod tests {
     use super::*;
 
     fn registered(pid: u32) -> bool {
-        CHILDREN.iter().any(|slot| slot.load(Ordering::SeqCst) == pid as i32)
+        CHILDREN
+            .iter()
+            .any(|slot| slot.load(Ordering::SeqCst) == pid as i32)
     }
 
     /// A solver started while another runs (an audit) must not take the

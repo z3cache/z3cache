@@ -25,7 +25,13 @@ impl Session<'_> {
     /// fresh solver given the whole current path, before answering. The
     /// audit never changes the outcome of the session except to correct a
     /// contradicted entry.
-    pub(super) fn audited_hit(&mut self, cmd: &Command, h: Hashes, entry: Entry, start: Instant) -> Result<(), Stop> {
+    pub(super) fn audited_hit(
+        &mut self,
+        cmd: &Command,
+        h: Hashes,
+        entry: Entry,
+        start: Instant,
+    ) -> Result<(), Stop> {
         self.counts.audits += 1;
         let cached = Verdict::of(&entry.response);
         let key_hex = h.key.to_hex();
@@ -42,7 +48,9 @@ impl Session<'_> {
                     Some((response, delta, now))
                 } else {
                     self.counts.audit_instabilities += 1;
-                    log!("audit: instability for {key_hex}: cached {cached}, now {now}; keeping the entry");
+                    log!(
+                        "audit: instability for {key_hex}: cached {cached}, now {now}; keeping the entry"
+                    );
                     None
                 }
             }
@@ -56,7 +64,8 @@ impl Session<'_> {
         // Answered by a solver: a miss (rule 10).
         self.counts.misses += 1;
         self.rlimit += delta;
-        self.state.append_query(cmd.canonical.as_slice(), response.as_slice(), now);
+        self.state
+            .append_query(cmd.canonical.as_slice(), response.as_slice(), now);
         self.write_client(&response)?;
         self.record(true, Some(h), Some(now), start, "solver");
         Ok(())
@@ -69,7 +78,9 @@ impl Session<'_> {
     fn audit(&mut self, query: &[u8]) -> Result<(Vec<u8>, u64), String> {
         let mut path = Vec::new();
         let push = self.profile.push_command();
-        push_unsent(&self.state, push, &mut vec![0], &mut path, |batch, r| push_line(batch, &r.command));
+        push_unsent(&self.state, push, &mut vec![0], &mut path, |batch, r| {
+            push_line(batch, &r.command)
+        });
         let stats = self.profile.statistics_command();
         let sections = vec![
             Section::lines(path, Output::Own),
@@ -77,8 +88,8 @@ impl Session<'_> {
             Section::command(query, Output::Own),
             Section::command(stats, Output::Own),
         ];
-        let mut solver =
-            Channel::spawn(self.real, self.args, self.framing.clone()).map_err(|e| format!("cannot start: {e}"))?;
+        let mut solver = Channel::spawn(self.real, self.args, self.framing.clone())
+            .map_err(|e| format!("cannot start: {e}"))?;
         let result = solver.exchange(sections);
         let _ = solver.finish();
         let Ok(mut replies) = result else {

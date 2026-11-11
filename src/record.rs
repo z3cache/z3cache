@@ -28,7 +28,8 @@ use crate::state::{Hashes, Verdict};
 /// lacked it.
 pub const RECORDS_HEADER: &str =
     "# z3cache records v2\tseq\tkind\tdepth\tkey\tcontext\tquery\tverdict\tus\tserved";
-pub const RECORDS_HEADER_V1: &str = "# z3cache records v1\tseq\tkind\tdepth\tkey\tcontext\tquery\tverdict\tus";
+pub const RECORDS_HEADER_V1: &str =
+    "# z3cache records v1\tseq\tkind\tdepth\tkey\tcontext\tquery\tverdict\tus";
 
 pub fn unix_ms() -> u128 {
     crate::since_epoch().as_millis()
@@ -43,7 +44,12 @@ pub fn join_args(args: &[OsString]) -> String {
 
 /// Appends an `exec.log` line for an invocation that bypasses the proxy.
 pub fn record_exec(dir: &Path, args: &[OsString]) {
-    let line = format!("{}\t{}\t{}\n", unix_ms(), std::process::id(), join_args(args));
+    let line = format!(
+        "{}\t{}\t{}\n",
+        unix_ms(),
+        std::process::id(),
+        join_args(args)
+    );
     let result = fs::create_dir_all(dir).and_then(|_| {
         OpenOptions::new()
             .create(true)
@@ -92,10 +98,11 @@ fn open(path: &Path) -> Option<BufWriter<File>> {
 /// Writes to a transcript file; an error is logged and disables the file.
 pub(crate) fn write_or_disable(w: &mut Option<BufWriter<File>>, what: &str, bytes: &[u8]) {
     if let Some(f) = w
-        && let Err(e) = f.write_all(bytes) {
-            log!("recording {what} failed: {e}");
-            *w = None;
-        }
+        && let Err(e) = f.write_all(bytes)
+    {
+        log!("recording {what} failed: {e}");
+        *w = None;
+    }
 }
 
 /// Flushes a transcript file, logging an error.
@@ -117,7 +124,11 @@ impl Recorder {
         let id = format!("{start}-{}", std::process::id());
         let path = |ext: &str| dir.join(format!("{id}.{ext}"));
         let mut records = open(&path("tsv"));
-        write_or_disable(&mut records, "records", format!("{RECORDS_HEADER}\n").as_bytes());
+        write_or_disable(
+            &mut records,
+            "records",
+            format!("{RECORDS_HEADER}\n").as_bytes(),
+        );
         let mut r = Recorder {
             dir: dir.to_path_buf(),
             input: open(&path("in")),
@@ -161,7 +172,9 @@ impl Recorder {
 
     pub fn record(&mut self, r: &Record<'_>) {
         let hex = |f: fn(&Hashes) -> blake3::Hash| {
-            r.hashes.map(|h| f(&h).to_hex().to_string()).unwrap_or_else(|| "-".into())
+            r.hashes
+                .map(|h| f(&h).to_hex().to_string())
+                .unwrap_or_else(|| "-".into())
         };
         let line = format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",

@@ -43,7 +43,9 @@ macro_rules! require_verus {
         match verus() {
             Some(v) => v,
             None => {
-                eprintln!("SKIPPED: set Z3CACHE_VERUS to a verus binary to run the end-to-end tests");
+                eprintln!(
+                    "SKIPPED: set Z3CACHE_VERUS to a verus binary to run the end-to-end tests"
+                );
                 return;
             }
         }
@@ -86,14 +88,21 @@ impl Outcome {
 
 impl std::fmt::Display for Outcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "exit {}\n--- stdout\n{}--- stderr\n{}", self.code, self.stdout, self.stderr)
+        write!(
+            f,
+            "exit {}\n--- stdout\n{}--- stderr\n{}",
+            self.code, self.stdout, self.stderr
+        )
     }
 }
 
 /// Asserts that two runs printed the same and exited the same.
 #[track_caller]
 fn assert_same(what: &str, got: &Outcome, want: &Outcome) {
-    assert!(got == want, "{what} differs\n=== got\n{got}\n=== want\n{want}");
+    assert!(
+        got == want,
+        "{what} differs\n=== got\n{got}\n=== want\n{want}"
+    );
 }
 
 impl Verus {
@@ -104,7 +113,14 @@ impl Verus {
 
     /// Runs Verus on `dir/file` through z3cache with the cache in `cache`
     /// and `env` added.
-    fn cached(&self, dir: &Path, file: &str, args: &[&str], cache: &Path, env: &[(&str, &str)]) -> Outcome {
+    fn cached(
+        &self,
+        dir: &Path,
+        file: &str,
+        args: &[&str],
+        cache: &Path,
+        env: &[(&str, &str)],
+    ) -> Outcome {
         let z3cache = z3cache();
         let mut vars = vec![
             ("VERUS_Z3_PATH", z3cache.as_os_str()),
@@ -143,14 +159,20 @@ impl Verus {
         let group = child.id() as i32;
         let (tx, rx) = mpsc::channel();
         for (name, mut pipe) in [
-            ("stdout", Box::new(child.stdout.take().unwrap()) as Box<dyn Read + Send>),
+            (
+                "stdout",
+                Box::new(child.stdout.take().unwrap()) as Box<dyn Read + Send>,
+            ),
             ("stderr", Box::new(child.stderr.take().unwrap())),
         ] {
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let mut buf = Vec::new();
                 let _ = pipe.read_to_end(&mut buf);
-                let _ = tx.send(Event::Closed(name, String::from_utf8_lossy(&buf).into_owned()));
+                let _ = tx.send(Event::Closed(
+                    name,
+                    String::from_utf8_lossy(&buf).into_owned(),
+                ));
             });
         }
         std::thread::spawn(move || {
@@ -191,7 +213,9 @@ enum Event {
 /// `tests/verus/<name>.rs`, under the same file name.
 fn sample(name: &str, tag: &str) -> PathBuf {
     let dir = temp_dir(&format!("e2e-{tag}"));
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/verus").join(format!("{name}.rs"));
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/verus")
+        .join(format!("{name}.rs"));
     std::fs::copy(&src, dir.join(format!("{name}.rs"))).unwrap();
     dir
 }
@@ -206,7 +230,11 @@ fn stats(cache: &Path) -> Stats {
             cmd.env_remove(k);
         }
     }
-    let out = cmd.args(["stats", "--json"]).env("Z3CACHE_DIR", cache).output().unwrap();
+    let out = cmd
+        .args(["stats", "--json"])
+        .env("Z3CACHE_DIR", cache)
+        .output()
+        .unwrap();
     assert!(out.status.success(), "z3cache stats failed");
     Stats(String::from_utf8(out.stdout).unwrap())
 }
@@ -239,7 +267,10 @@ impl Stats {
 
 fn number_after(text: &str, label: &str) -> Option<i64> {
     let at = text.find(label)? + label.len();
-    let digits: String = text[at..].chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+    let digits: String = text[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
     digits.parse().ok()
 }
 
@@ -266,7 +297,10 @@ fn recorded(dir: &Path) -> Vec<Recorded> {
         let meta = std::fs::read_to_string(&path)
             .unwrap()
             .lines()
-            .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+            .filter_map(|l| {
+                l.split_once('=')
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+            })
             .collect();
         let rows = std::fs::read_to_string(path.with_extension("tsv"))
             .unwrap()
@@ -292,7 +326,10 @@ impl Recorded {
             .copied()
             .filter(|m| self.input.contains(&format!("{krate}!{m}.")))
             .collect();
-        assert!(found.len() <= 1, "a session declares items of several modules: {found:?}");
+        assert!(
+            found.len() <= 1,
+            "a session declares items of several modules: {found:?}"
+        );
         found.first().copied().unwrap_or("root").to_string()
     }
 
@@ -301,7 +338,14 @@ impl Recorded {
     }
 }
 
-const PASSING_MODULES: &[&str] = &["arith", "loops", "recursion", "quant", "shapes", "collections"];
+const PASSING_MODULES: &[&str] = &[
+    "arith",
+    "loops",
+    "recursion",
+    "quant",
+    "shapes",
+    "collections",
+];
 
 /// (a) A crate of varied passing proofs: identical output directly, cold
 /// and warm; the warm run starts no solver and is answered from the cache.
@@ -324,10 +368,19 @@ fn passing_crate_is_identical_and_warm_starts_no_solver() {
     let warm = v.cached(&dir, "passing.rs", &[], &cache, &[]);
     assert_same("warm run", &warm, &direct);
     let after_warm = stats(&cache);
-    assert_eq!(grew(&after_cold, &after_warm, "solver_starts"), 0, "the warm run started a solver");
+    assert_eq!(
+        grew(&after_cold, &after_warm, "solver_starts"),
+        0,
+        "the warm run started a solver"
+    );
     assert_eq!(grew(&after_cold, &after_warm, "misses"), 0);
     assert!(grew(&after_cold, &after_warm, "hits") > 0);
-    assert_eq!(after_warm.get("bypassed_sessions"), 0, "{}", after_warm.bypass_reasons());
+    assert_eq!(
+        after_warm.get("bypassed_sessions"),
+        0,
+        "{}",
+        after_warm.bypass_reasons()
+    );
     assert_eq!(after_warm.get("replay_mismatches"), 0);
 }
 
@@ -344,7 +397,10 @@ fn failing_crate_reports_the_same_errors() {
     assert_ne!(direct.code, 0, "{direct}");
     assert!(direct.results().contains(" 2 errors"), "{direct}");
     assert!(direct.stderr.contains("assertion failed"), "{direct}");
-    assert!(direct.stderr.contains("postcondition not satisfied"), "{direct}");
+    assert!(
+        direct.stderr.contains("postcondition not satisfied"),
+        "{direct}"
+    );
 
     let cold = v.cached(&dir, "failing.rs", &[], &cache, &[]);
     assert_same("cold run", &cold, &direct);
@@ -353,8 +409,14 @@ fn failing_crate_reports_the_same_errors() {
     let warm = v.cached(&dir, "failing.rs", &[], &cache, &[]);
     assert_same("warm run", &warm, &direct);
     let after_warm = stats(&cache);
-    assert!(grew(&after_cold, &after_warm, "solver_starts") > 0, "the failures were not re-solved");
-    assert!(grew(&after_cold, &after_warm, "hits") > 0, "the passing functions were not cached");
+    assert!(
+        grew(&after_cold, &after_warm, "solver_starts") > 0,
+        "the failures were not re-solved"
+    );
+    assert!(
+        grew(&after_cold, &after_warm, "hits") > 0,
+        "the passing functions were not cached"
+    );
 
     // Store failures too: the first run stores them, the second needs no
     // solver.
@@ -365,7 +427,11 @@ fn failing_crate_reports_the_same_errors() {
     let warm_all = v.cached(&dir, "failing.rs", &[], &cache, &all);
     assert_same("second run storing all", &warm_all, &direct);
     let after = stats(&cache);
-    assert_eq!(grew(&before, &after, "solver_starts"), 0, "the second run storing all started a solver");
+    assert_eq!(
+        grew(&before, &after, "solver_starts"),
+        0,
+        "the second run storing all started a solver"
+    );
     assert_eq!(grew(&before, &after, "misses"), 0);
     assert_eq!(after.get("replay_mismatches"), 0);
 }
@@ -380,7 +446,10 @@ fn exceeded_rlimit_is_reported_identically() {
 
     let direct = v.direct(&dir, "rlimit.rs", &[]);
     assert_ne!(direct.code, 0, "{direct}");
-    assert!(direct.stderr.contains("resource limit (rlimit) exceeded"), "{direct}");
+    assert!(
+        direct.stderr.contains("resource limit (rlimit) exceeded"),
+        "{direct}"
+    );
     assert!(direct.results().contains(" 1 errors"), "{direct}");
 
     let cold = v.cached(&dir, "rlimit.rs", &[], &cache, &[]);
@@ -389,7 +458,10 @@ fn exceeded_rlimit_is_reported_identically() {
     let warm = v.cached(&dir, "rlimit.rs", &[], &cache, &[]);
     assert_same("warm run", &warm, &direct);
     let after = stats(&cache);
-    assert!(grew(&before, &after, "solver_starts") > 0, "the exceeded query was not re-solved");
+    assert!(
+        grew(&before, &after, "solver_starts") > 0,
+        "the exceeded query was not re-solved"
+    );
     assert!(grew(&before, &after, "hits") > 0);
 }
 
@@ -402,7 +474,13 @@ fn an_edit_misses_only_in_the_edited_module() {
     let original = sample("passing", "edit-original");
     let cache = original.join("cache");
     let cold_rec = original.join("record-cold");
-    let cold = v.cached(&original, "passing.rs", &[], &cache, &[("Z3CACHE_RECORD", cold_rec.to_str().unwrap())]);
+    let cold = v.cached(
+        &original,
+        "passing.rs",
+        &[],
+        &cache,
+        &[("Z3CACHE_RECORD", cold_rec.to_str().unwrap())],
+    );
     assert_eq!(cold.code, 0, "{cold}");
     let cold_keys: BTreeSet<String> = recorded(&cold_rec)
         .iter()
@@ -417,11 +495,21 @@ fn an_edit_misses_only_in_the_edited_module() {
         dir
     };
     // `count_down` in module `loops` gains a postcondition that holds.
-    let good = edit("        ensures\n            r == 0,\n", "        ensures\n            r == 0,\n            r <= n,\n", "edit-good");
+    let good = edit(
+        "        ensures\n            r == 0,\n",
+        "        ensures\n            r == 0,\n            r <= n,\n",
+        "edit-good",
+    );
     let direct = v.direct(&good, "passing.rs", &[]);
     assert!(direct.results().contains(" 0 errors"), "{direct}");
     let rec = good.join("record");
-    let warm = v.cached(&good, "passing.rs", &[], &cache, &[("Z3CACHE_RECORD", rec.to_str().unwrap())]);
+    let warm = v.cached(
+        &good,
+        "passing.rs",
+        &[],
+        &cache,
+        &[("Z3CACHE_RECORD", rec.to_str().unwrap())],
+    );
     assert_same("edited crate, warm", &warm, &direct);
 
     let sessions = recorded(&rec);
@@ -432,20 +520,41 @@ fn an_edit_misses_only_in_the_edited_module() {
         if module == "loops" {
             edited_misses += misses.len();
             for (key, _) in misses {
-                assert!(!cold_keys.contains(key), "loops: a query seen in the cold run missed");
+                assert!(
+                    !cold_keys.contains(key),
+                    "loops: a query seen in the cold run missed"
+                );
             }
         } else {
-            assert!(misses.is_empty(), "module {module} is unchanged but missed {} times", misses.len());
-            assert_eq!(s.solver_starts(), 0, "module {module} is unchanged but started a solver");
+            assert!(
+                misses.is_empty(),
+                "module {module} is unchanged but missed {} times",
+                misses.len()
+            );
+            assert_eq!(
+                s.solver_starts(),
+                0,
+                "module {module} is unchanged but started a solver"
+            );
         }
     }
-    assert!(edited_misses > 0, "the edited function's queries did not miss");
+    assert!(
+        edited_misses > 0,
+        "the edited function's queries did not miss"
+    );
 
     // `count_down` now claims a false postcondition.
-    let bad = edit("        ensures\n            r == 0,\n", "        ensures\n            r == 1,\n", "edit-bad");
+    let bad = edit(
+        "        ensures\n            r == 0,\n",
+        "        ensures\n            r == 1,\n",
+        "edit-bad",
+    );
     let direct = v.direct(&bad, "passing.rs", &[]);
     assert_ne!(direct.code, 0, "{direct}");
-    assert!(direct.stderr.contains("postcondition not satisfied"), "{direct}");
+    assert!(
+        direct.stderr.contains("postcondition not satisfied"),
+        "{direct}"
+    );
     let warm = v.cached(&bad, "passing.rs", &[], &cache, &[]);
     assert_same("broken edit, warm", &warm, &direct);
 }
@@ -465,10 +574,18 @@ impl Gate {
         let path = dir.join("gate");
         let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
         // SAFETY: a valid NUL-terminated path.
-        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo failed");
+        assert_eq!(
+            unsafe { libc::mkfifo(c.as_ptr(), 0o600) },
+            0,
+            "mkfifo failed"
+        );
         // Read-write, so that opening does not wait for a reader and the
         // shims' reads block instead of seeing end of file.
-        let fifo = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let fifo = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
         let quote = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
         let shim = dir.join("z3-gated");
         std::fs::write(
@@ -530,21 +647,34 @@ fn concurrent_worktrees(name: &str) {
         &z3cache(),
         &["-smt2", "-in"],
         b"(get-info :version)",
-        &[("Z3CACHE_REAL_Z3", OsStr::new(&shim)), ("Z3CACHE_DIR", shared.as_os_str())],
+        &[
+            ("Z3CACHE_REAL_Z3", OsStr::new(&shim)),
+            ("Z3CACHE_DIR", shared.as_os_str()),
+        ],
         LIMIT,
     )
     .expect("asking the version did not finish");
-    assert!(version.text().starts_with("(:version"), "{}", version.text());
+    assert!(
+        version.text().starts_with("(:version"),
+        "{}",
+        version.text()
+    );
     let before = stats(&shared);
 
-    let trees = [sample(name, &format!("{name}-wt1")), sample(name, &format!("{name}-wt2"))];
+    let trees = [
+        sample(name, &format!("{name}-wt1")),
+        sample(name, &format!("{name}-wt2")),
+    ];
     let logs: Vec<PathBuf> = trees.iter().map(|t| t.join("z3cache.log")).collect();
     let outcomes: Vec<Outcome> = std::thread::scope(|s| {
         let runs: Vec<_> = trees
             .iter()
             .zip(&logs)
             .map(|(t, log)| {
-                let env = [("Z3CACHE_REAL_Z3", shim.as_str()), ("Z3CACHE_LOG", log.to_str().unwrap())];
+                let env = [
+                    ("Z3CACHE_REAL_Z3", shim.as_str()),
+                    ("Z3CACHE_LOG", log.to_str().unwrap()),
+                ];
                 let (v, file, shared) = (&v, &file, &shared);
                 s.spawn(move || v.cached(t, file, &[], shared, &env))
             })
@@ -570,19 +700,28 @@ fn concurrent_worktrees(name: &str) {
     }
     let after = stats(&shared);
     let misses = grew(&before, &after, "misses");
-    let (waits, lock_hits) = (grew(&before, &after, "lock_waits"), grew(&before, &after, "lock_hits"));
+    let (waits, lock_hits) = (
+        grew(&before, &after, "lock_waits"),
+        grew(&before, &after, "lock_hits"),
+    );
     eprintln!(
         "{name}: one cold run solved {cold_misses}, a warm run re-solved {resolved}; two concurrent runs \
          solved {misses} (lock waits {waits}, hits after taking a lock {lock_hits})"
     );
     assert!(waits > 0);
-    assert!(misses >= cold_misses, "two runs solved less than one cold run");
+    assert!(
+        misses >= cold_misses,
+        "two runs solved less than one cold run"
+    );
     assert!(
         misses <= cold_misses + resolved,
         "two concurrent runs solved {misses} queries; one cold run solves {cold_misses} and {resolved} are re-solved"
     );
     if resolved == 0 {
-        assert!(lock_hits > 0, "a session that waited did not find the answer stored");
+        assert!(
+            lock_hits > 0,
+            "a session that waited did not find the answer stored"
+        );
     }
     assert_eq!(grew(&before, &after, "lock_timeouts"), 0);
     assert_eq!(after.get("replay_mismatches"), 0);
@@ -629,7 +768,10 @@ fn time_reports_the_same_rlimit_totals_cold_and_warm() {
         assert_same(what, &o.without_timings(), &direct.without_timings());
     }
     let (cold_t, warm_t) = (rlimit_totals(&cold), rlimit_totals(&warm));
-    eprintln!("rlimit totals (init, run): direct {:?}, cold {cold_t:?}, warm {warm_t:?}", rlimit_totals(&direct));
+    eprintln!(
+        "rlimit totals (init, run): direct {:?}, cold {cold_t:?}, warm {warm_t:?}",
+        rlimit_totals(&direct)
+    );
     assert!(cold_t.1 > 0);
     assert_eq!(cold_t, warm_t, "rlimit totals differ cold and warm");
 }
@@ -654,10 +796,17 @@ fn profiling_sessions_bypass_and_match() {
     let cache = dir.join("cache");
     let args = ["--profile"];
     let direct = v.direct(&dir, "rlimit.rs", &args);
-    assert!(direct.stderr.contains("note: profile statistics"), "{direct}");
+    assert!(
+        direct.stderr.contains("note: profile statistics"),
+        "{direct}"
+    );
     for pass in ["cold", "warm"] {
         let o = v.cached(&dir, "rlimit.rs", &args, &cache, &[]);
-        assert_eq!(sorted_lines(&o), sorted_lines(&direct), "--profile, {pass}\n=== proxied\n{o}\n=== direct\n{direct}");
+        assert_eq!(
+            sorted_lines(&o),
+            sorted_lines(&direct),
+            "--profile, {pass}\n=== proxied\n{o}\n=== direct\n{direct}"
+        );
     }
     let s = stats(&cache);
     assert_eq!(s.get("bypassed_sessions"), 2, "{}", s.0);
@@ -670,7 +819,11 @@ fn profiling_sessions_bypass_and_match() {
     let direct = v.direct(&dir, "passing.rs", &args);
     assert_eq!(direct.code, 0, "{direct}");
     let proxied = v.cached(&dir, "passing.rs", &args, &cache, &[]);
-    assert_eq!(sorted_lines(&proxied), sorted_lines(&direct), "\n=== proxied\n{proxied}\n=== direct\n{direct}");
+    assert_eq!(
+        sorted_lines(&proxied),
+        sorted_lines(&direct),
+        "\n=== proxied\n{proxied}\n=== direct\n{direct}"
+    );
     let s = stats(&cache);
     assert!(s.get("sessions") > 1);
     assert_eq!(s.get("bypassed_sessions"), s.get("sessions"), "{}", s.0);
@@ -714,9 +867,21 @@ fn modes_behave_with_verus() {
     assert_same("mode off", &off, &direct);
     assert!(!cache.join(FILE_NAME).exists(), "mode off created a store");
 
-    let enforce = v.cached(&dir, "passing.rs", &[], &cache, &[("Z3CACHE_MODE", "enforce")]);
-    assert_ne!(enforce.code, 0, "enforce on an empty cache succeeded:\n{enforce}");
-    assert!(!cache.join(FILE_NAME).exists(), "mode enforce created a store");
+    let enforce = v.cached(
+        &dir,
+        "passing.rs",
+        &[],
+        &cache,
+        &[("Z3CACHE_MODE", "enforce")],
+    );
+    assert_ne!(
+        enforce.code, 0,
+        "enforce on an empty cache succeeded:\n{enforce}"
+    );
+    assert!(
+        !cache.join(FILE_NAME).exists(),
+        "mode enforce created a store"
+    );
 
     let ro_cold = v.cached(&dir, "passing.rs", &[], &cache, &[("Z3CACHE_MODE", "ro")]);
     assert_same("mode ro, empty cache", &ro_cold, &direct);
@@ -727,11 +892,21 @@ fn modes_behave_with_verus() {
     let before = store_rows(&cache);
     assert!(before.iter().any(|r| r.starts_with("entry: ")));
 
-    let enforce = v.cached(&dir, "passing.rs", &[], &cache, &[("Z3CACHE_MODE", "enforce")]);
+    let enforce = v.cached(
+        &dir,
+        "passing.rs",
+        &[],
+        &cache,
+        &[("Z3CACHE_MODE", "enforce")],
+    );
     assert_same("mode enforce, warm", &enforce, &direct);
     let ro = v.cached(&dir, "passing.rs", &[], &cache, &[("Z3CACHE_MODE", "ro")]);
     assert_same("mode ro, warm", &ro, &direct);
-    assert_eq!(store_rows(&cache), before, "read-only modes changed the store");
+    assert_eq!(
+        store_rows(&cache),
+        before,
+        "read-only modes changed the store"
+    );
 }
 
 const MODULES: &[&str] = &["bits", "ranges", "search", "counting", "sets", "top"];
@@ -753,11 +928,19 @@ fn multi_module_crate_with_threads() {
         let cold = v.cached(&dir, "modules.rs", args, &cache, &[]);
         assert_same(&format!("{tag}, cold"), &cold, &direct);
         let after_cold = stats(&cache);
-        assert!(after_cold.get("sessions") as usize > MODULES.len(), "{tag}: {}", after_cold.0);
+        assert!(
+            after_cold.get("sessions") as usize > MODULES.len(),
+            "{tag}: {}",
+            after_cold.0
+        );
         let warm = v.cached(&dir, "modules.rs", args, &cache, &[]);
         assert_same(&format!("{tag}, warm"), &warm, &direct);
         let after_warm = stats(&cache);
-        assert_eq!(grew(&after_cold, &after_warm, "solver_starts"), 0, "{tag}: the warm run started a solver");
+        assert_eq!(
+            grew(&after_cold, &after_warm, "solver_starts"),
+            0,
+            "{tag}: the warm run started a solver"
+        );
         assert!(grew(&after_cold, &after_warm, "hits") > 0);
     }
 }
@@ -771,18 +954,34 @@ fn analyze_projects_the_second_run_as_hits() {
     let cache = dir.join("cache");
     let (r1, r2) = (dir.join("record-1"), dir.join("record-2"));
     for rec in [&r1, &r2] {
-        let o = v.cached(&dir, "passing.rs", &[], &cache, &[("Z3CACHE_RECORD", rec.to_str().unwrap())]);
+        let o = v.cached(
+            &dir,
+            "passing.rs",
+            &[],
+            &cache,
+            &[("Z3CACHE_RECORD", rec.to_str().unwrap())],
+        );
         assert_eq!(o.code, 0, "{o}");
     }
     // The second run was answered from the cache.
     let second = recorded(&r2);
     assert!(second.iter().flat_map(|s| &s.rows).all(|r| r.1 == "cache"));
 
-    let out = Command::new(z3cache()).arg("analyze").arg(&r1).arg(&r2).output().unwrap();
+    let out = Command::new(z3cache())
+        .arg("analyze")
+        .arg(&r1)
+        .arg(&r2)
+        .output()
+        .unwrap();
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(out.status.success(), "analyze failed:\n{text}");
-    let (first, second) = text.split_once("\nrecording 2:").unwrap_or_else(|| panic!("{text}"));
-    assert!(first.contains("projection        none (first recording"), "{text}");
+    let (first, second) = text
+        .split_once("\nrecording 2:")
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        first.contains("projection        none (first recording"),
+        "{text}"
+    );
     assert!(second.contains("projection (nothing was cached)"), "{text}");
     let queries = second
         .lines()
@@ -795,5 +994,8 @@ fn analyze_projects_the_second_run_as_hits() {
         .and_then(|l| l.split_whitespace().next())
         .unwrap_or_else(|| panic!("no would-hit line:\n{text}"));
     assert_ne!(queries, "0", "{text}");
-    assert_eq!(would_hit, queries, "not every query of the second run would hit:\n{text}");
+    assert_eq!(
+        would_hit, queries,
+        "not every query of the second run would hit:\n{text}"
+    );
 }

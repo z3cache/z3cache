@@ -130,7 +130,10 @@ pub fn run(cfg: &Config, profile: &dyn SolverProfile, real: &Path, args: &[OsStr
         });
         (info, key_ctx)
     } else {
-        let unhashed = SolverInfo { id: [0; 32], version_response: None };
+        let unhashed = SolverInfo {
+            id: [0; 32],
+            version_response: None,
+        };
         (Some(unhashed), None)
     };
 
@@ -143,10 +146,15 @@ pub fn run(cfg: &Config, profile: &dyn SolverProfile, real: &Path, args: &[OsStr
     }
 
     let nonce = make_nonce();
-    let sentinel = format!("z3cache-sentinel-{}", &blake3::Hash::from(nonce).to_hex()[..20]);
+    let sentinel = format!(
+        "z3cache-sentinel-{}",
+        &blake3::Hash::from(nonce).to_hex()[..20]
+    );
     let wall_clock_arg = args.iter().any(|a| {
         let a = a.as_encoded_bytes();
-        a.iter().position(|&c| c == b'=').is_some_and(|eq| profile.is_wall_clock_option(&a[..eq]))
+        a.iter()
+            .position(|&c| c == b'=')
+            .is_some_and(|eq| profile.is_wall_clock_option(&a[..eq]))
     });
     let mut s = Session {
         profile,
@@ -249,11 +257,14 @@ impl<'a> Session<'a> {
             Class::Push(n) => self.state.push(n),
             Class::Pop(n) => {
                 if self.state.pop(n).is_err() {
-                    return self.framed_bypass("pop below the base frame", Some((cmd, Class::Pop(n))));
+                    return self
+                        .framed_bypass("pop below the base frame", Some((cmd, Class::Pop(n))));
                 }
                 self.pop_live()?;
             }
-            Class::SetOption { name, value } => self.state.set_option(&name, &value, &cmd.canonical),
+            Class::SetOption { name, value } => {
+                self.state.set_option(&name, &value, &cmd.canonical)
+            }
             Class::Local => self.local(&cmd)?,
             Class::Statistics => self.statistics()?,
             Class::Query => self.lookup_or_solve(&cmd, true)?,
@@ -279,10 +290,17 @@ impl<'a> Session<'a> {
     fn local(&mut self, cmd: &Command) -> Result<(), Stop> {
         if cmd.head() == Some(b"echo") {
             let tok = cmd.args()[0].bytes();
-            let out = self.profile.echo_response(tok).expect("classified echo has a string argument");
+            let out = self
+                .profile
+                .echo_response(tok)
+                .expect("classified echo has a string argument");
             return self.write_client(&out);
         }
-        if let Some(v) = self.solver_info.as_ref().and_then(|i| i.version_response.clone()) {
+        if let Some(v) = self
+            .solver_info
+            .as_ref()
+            .and_then(|i| i.version_response.clone())
+        {
             return self.write_client(&v);
         }
         self.materialize()?;
@@ -312,7 +330,10 @@ impl<'a> Session<'a> {
             return self.write_client(&out);
         }
         let v = self.rlimit;
-        let reply = self.ask(self.profile.statistics_command(), Output::Statistics(Box::new(move |_| v)))?;
+        let reply = self.ask(
+            self.profile.statistics_command(),
+            Output::Statistics(Box::new(move |_| v)),
+        )?;
         self.write_client(&reply.text())
     }
 
@@ -325,7 +346,9 @@ impl<'a> Session<'a> {
     fn policy_allows(&self, verdict: Option<Verdict>) -> bool {
         match (self.cfg.store_policy, verdict) {
             (_, Some(Verdict::Unsat)) => true,
-            (StorePolicy::All, Some(Verdict::Sat | Verdict::Unknown)) => !self.wall_clock_in_effect(),
+            (StorePolicy::All, Some(Verdict::Sat | Verdict::Unknown)) => {
+                !self.wall_clock_in_effect()
+            }
             _ => false,
         }
     }
@@ -336,28 +359,51 @@ impl<'a> Session<'a> {
         if e.is_query != is_query {
             return None;
         }
-        let verdict = if is_query { Some(Verdict::of(&e.response)) } else { self.state.last_query_verdict() };
+        let verdict = if is_query {
+            Some(Verdict::of(&e.response))
+        } else {
+            self.state.last_query_verdict()
+        };
         self.policy_allows(verdict).then_some(e)
     }
 
     fn wall_clock_in_effect(&self) -> bool {
-        self.wall_clock_arg || self.state.options().any(|(name, _, _)| self.profile.is_wall_clock_option(name))
+        self.wall_clock_arg
+            || self
+                .state
+                .options()
+                .any(|(name, _, _)| self.profile.is_wall_clock_option(name))
     }
 
     /// Whether a solver response may be stored (section 7). `verdict` is the
     /// query's own, or `None` for a read. The store itself skips writes
     /// outside `rw` mode.
-    fn storable(&self, clean: bool, is_query: bool, response: &[u8], verdict: Option<Verdict>) -> bool {
+    fn storable(
+        &self,
+        clean: bool,
+        is_query: bool,
+        response: &[u8],
+        verdict: Option<Verdict>,
+    ) -> bool {
         if !clean || self.no_store {
             return false;
         }
-        let last = if is_query { verdict } else { self.state.last_query_verdict() };
+        let last = if is_query {
+            verdict
+        } else {
+            self.state.last_query_verdict()
+        };
         // A query's response is exactly its verdict line.
-        self.policy_allows(last) && (!is_query || last.is_some_and(|v| response == format!("{v}\n").as_bytes()))
+        self.policy_allows(last)
+            && (!is_query || last.is_some_and(|v| response == format!("{v}\n").as_bytes()))
     }
 
     fn verify(&self) -> f64 {
-        if self.cfg.mode == Mode::Rw { self.cfg.verify } else { 0.0 }
+        if self.cfg.mode == Mode::Rw {
+            self.cfg.verify
+        } else {
+            0.0
+        }
     }
 
     /// Writes a stored response. `count_hit` is false when a solver was
@@ -382,12 +428,19 @@ impl<'a> Session<'a> {
         let verdict = if entry.is_query {
             self.rlimit += entry.rlimit.unwrap_or(0);
             let v = Verdict::of(&entry.response);
-            self.state.append_query(cmd.canonical.as_slice(), entry.response, v);
+            self.state
+                .append_query(cmd.canonical.as_slice(), entry.response, v);
             Some(v)
         } else {
             None
         };
-        self.record(entry.is_query, Some(h), verdict, start, if count_hit { "cache" } else { "audited" });
+        self.record(
+            entry.is_query,
+            Some(h),
+            verdict,
+            start,
+            if count_hit { "cache" } else { "audited" },
+        );
         Ok(())
     }
 
@@ -415,7 +468,11 @@ impl<'a> Session<'a> {
     /// canonical form, or the client's text for commands whose response
     /// echoes it.
     fn wire<'c>(&self, cmd: &'c Command) -> &'c [u8] {
-        if self.profile.echoes_input(cmd) { cmd.text() } else { &cmd.canonical }
+        if self.profile.echoes_input(cmd) {
+            cmd.text()
+        } else {
+            &cmd.canonical
+        }
     }
 
     fn lookup_or_solve(&mut self, cmd: &Command, is_query: bool) -> Result<(), Stop> {
@@ -492,8 +549,13 @@ impl<'a> Session<'a> {
 
         let verdict = if is_query {
             self.rlimit += delta.unwrap_or(0);
-            let v = if clean { Verdict::of(&response) } else { Verdict::Error };
-            self.state.append_query(cmd.canonical.as_slice(), response.as_slice(), v);
+            let v = if clean {
+                Verdict::of(&response)
+            } else {
+                Verdict::Error
+            };
+            self.state
+                .append_query(cmd.canonical.as_slice(), response.as_slice(), v);
             if let Some(live) = &mut self.live {
                 // The solver has the query: keep the cursor at the end.
                 if let Some(top) = live.sent.last_mut() {
@@ -508,7 +570,13 @@ impl<'a> Session<'a> {
         if self.storable(clean, is_query, &response, verdict)
             && let Some(h) = hashes
         {
-            let entry = Entry { response: response.clone(), is_query, rlimit: delta, solve_us, last_used_s: 0 };
+            let entry = Entry {
+                response: response.clone(),
+                is_query,
+                rlimit: delta,
+                solve_us,
+                last_used_s: 0,
+            };
             if self.store.put(h.key.as_bytes(), &entry) {
                 self.counts.stores += 1;
             }
