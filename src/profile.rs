@@ -52,6 +52,10 @@ pub trait SolverProfile: Sync {
 
     /// The statistics response given when no solver is running.
     fn synthesize_statistics(&self, value: u64) -> Vec<u8>;
+
+    /// An error line in the solver's own format, for errors z3cache reports
+    /// itself (such as a cache miss in `enforce` mode).
+    fn error_line(&self, message: &str) -> Vec<u8>;
 }
 
 pub struct Z3;
@@ -161,6 +165,10 @@ impl SolverProfile for Z3 {
 
     fn synthesize_statistics(&self, value: u64) -> Vec<u8> {
         crate::rlimit::synthesize(value)
+    }
+
+    fn error_line(&self, message: &str) -> Vec<u8> {
+        format!("(error \"{}\")\n", message.replace('"', "\"\"")).into_bytes()
     }
 }
 

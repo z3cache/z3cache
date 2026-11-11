@@ -94,8 +94,8 @@ impl Session<'_> {
     /// client's.
     pub(super) fn materialize(&mut self) -> Result<(), Stop> {
         if self.cfg.mode == Mode::Enforce {
-            let msg = b"(error \"z3cache: cache miss in enforce mode\")\n";
-            let _ = self.write_client(msg);
+            let msg = self.profile.error_line("z3cache: cache miss in enforce mode");
+            let _ = self.write_client(&msg);
             log!("enforce: cache miss");
             return Err(Stop(1));
         }
