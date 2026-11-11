@@ -54,14 +54,6 @@ fn verus(verus: &Path, dir: &Path, cache: Option<&Path>) -> String {
         .to_string()
 }
 
-fn solver_starts(cache: &Path) -> i64 {
-    let out = run(&z3cache(), &["stats", "--json"], b"", &[("Z3CACHE_DIR", cache.as_os_str())]);
-    let json = out.text();
-    let all = &json[json.find("\"all_time\"").unwrap()..];
-    let at = all.find("\"solver_starts\": ").unwrap() + "\"solver_starts\": ".len();
-    all[at..].chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap()
-}
-
 #[test]
 fn verus_results_are_identical_and_warm_starts_no_solver() {
     let Some(verus_bin) = std::env::var_os("Z3CACHE_VERUS").filter(|v| !v.is_empty()).map(PathBuf::from)
@@ -77,9 +69,9 @@ fn verus_results_are_identical_and_warm_starts_no_solver() {
     assert!(direct.contains("0 errors"), "{direct}");
     let cold = verus(&verus_bin, &dir, Some(&cache));
     assert_eq!(cold, direct);
-    let after_cold = solver_starts(&cache);
+    let after_cold = counter(&cache, "solver_starts");
     assert!(after_cold > 0);
     let warm = verus(&verus_bin, &dir, Some(&cache));
     assert_eq!(warm, direct);
-    assert_eq!(solver_starts(&cache), after_cold, "the warm run started a solver");
+    assert_eq!(counter(&cache, "solver_starts"), after_cold, "the warm run started a solver");
 }

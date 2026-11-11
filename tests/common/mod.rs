@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use z3cache::store::{SqliteStore, Store};
+
 pub fn z3cache() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_z3cache"))
 }
@@ -50,16 +52,10 @@ impl Run {
     }
 }
 
-/// Runs `bin` with `args`, feeding `input` in chunks of `chunk` bytes, with
-/// all `Z3CACHE_*` and `Z3STUB_*` variables cleared and `env` set. Unless
-/// `env` sets `Z3CACHE_DIR`, the run gets a fresh, empty cache.
-pub fn run_chunked(
-    bin: &Path,
-    args: &[&str],
-    input: &[u8],
-    chunk: usize,
-    env: &[(&str, &OsStr)],
-) -> Run {
+/// A command running `bin` with `args`, stdin and stdout piped, all
+/// `Z3CACHE_*` and `Z3STUB_*` variables cleared and `env` set. Unless `env`
+/// sets `Z3CACHE_DIR`, it gets a fresh, empty cache.
+pub fn proxy_command(bin: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Command {
     let mut cmd = Command::new(bin);
     cmd.args(args)
         .stdin(Stdio::piped())
@@ -78,7 +74,19 @@ pub fn run_chunked(
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let mut child = cmd.spawn().unwrap();
+    cmd
+}
+
+/// Runs `bin` as [`proxy_command`] sets it up, feeding `input` in chunks of
+/// `chunk` bytes.
+pub fn run_chunked(
+    bin: &Path,
+    args: &[&str],
+    input: &[u8],
+    chunk: usize,
+    env: &[(&str, &OsStr)],
+) -> Run {
+    let mut child = proxy_command(bin, args, env).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let input = input.to_vec();
     let writer = std::thread::spawn(move || {
@@ -126,24 +134,7 @@ pub fn run_bounded(
     env: &[(&str, &OsStr)],
     limit: std::time::Duration,
 ) -> Run {
-    let mut cmd = Command::new(bin);
-    cmd.args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    for (k, _) in std::env::vars_os() {
-        let k = k.to_string_lossy();
-        if k.starts_with("Z3CACHE_") || k.starts_with("Z3STUB_") {
-            cmd.env_remove(&*k);
-        }
-    }
-    if !env.iter().any(|(k, _)| *k == "Z3CACHE_DIR") {
-        cmd.env("Z3CACHE_DIR", temp_dir("cache"));
-    }
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    let mut child = cmd.spawn().unwrap();
+    let mut child = proxy_command(bin, args, env).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let input = input.to_vec();
     std::thread::spawn(move || {
@@ -191,3 +182,19 @@ pub fn file_contains(path: &Path, needle: &str) -> bool {
 /// The line z3cache logs (Z3CACHE_LOG) when it first finds an in-flight
 /// lock held by another session.
 pub const LOCK_BUSY: &str = "in-flight lock busy";
+
+/// An all-time counter of the store in `cache`.
+pub fn counter(cache: &Path, name: &str) -> i64 {
+    let rows = SqliteStore::open_read_only(cache).unwrap().counters().unwrap();
+    rows.iter().filter(|r| r.1 == name).map(|r| r.2).sum()
+}
+
+/// `(declare-const x Int)`, then `n` distinct unsat queries, each in its own
+/// frame, numbered from `offset`.
+pub fn many_queries(offset: usize, n: usize) -> Vec<u8> {
+    let mut s = String::from("(declare-const x Int)\n");
+    for i in offset..offset + n {
+        s.push_str(&format!("(push)(assert (> x {i}))(check-sat)(pop)\n"));
+    }
+    s.into_bytes()
+}

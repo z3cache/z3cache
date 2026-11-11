@@ -6,7 +6,7 @@
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -79,6 +79,12 @@ impl Solver {
         }
     }
 
+    /// Writes bytes to the solver and flushes them.
+    pub fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.write(bytes)?;
+        self.flush()
+    }
+
     /// Reads lines until one equals one of `sentinels`, which is not
     /// returned.
     pub fn read_until(&mut self, sentinels: &[Vec<u8>]) -> Response {
@@ -116,18 +122,21 @@ impl Solver {
     }
 
     /// Closes the solver's stdin (flushing first), which tells it to exit.
-    pub fn close_stdin(&mut self) {
+    fn close_stdin(&mut self) {
         if let Some(mut w) = self.stdin.take() {
             let _ = w.flush();
         }
     }
 
-    /// Returns all remaining output lines; call after closing stdin.
-    pub fn read_rest(&mut self) -> Vec<Vec<u8>> {
-        match self.lines.take() {
-            Some(rx) => rx.iter().collect(),
+    /// Closes the solver's stdin, collects the rest of its output and waits
+    /// for it to exit. Returns that output and the exit code to pass on.
+    pub fn finish(&mut self) -> (Vec<u8>, i32) {
+        self.close_stdin();
+        let rest = match self.lines.take() {
+            Some(rx) => rx.iter().collect::<Vec<_>>().concat(),
             None => Vec::new(),
-        }
+        };
+        (rest, self.wait())
     }
 
     /// Waits for the solver to exit and returns the exit code to pass on.
@@ -152,15 +161,7 @@ impl Solver {
 pub fn hash_executable(path: &Path) -> io::Result<[u8; 32]> {
     let mut h = blake3::Hasher::new();
     h.update(b"z3cache/solver");
-    let mut f = File::open(path)?;
-    let mut buf = vec![0u8; 1 << 16];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
+    h.update_reader(File::open(path)?)?;
     Ok(*h.finalize().as_bytes())
 }
 

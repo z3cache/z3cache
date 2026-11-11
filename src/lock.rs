@@ -8,8 +8,7 @@
 //! a lock that fails, is lost, or is shared by mistake can at worst cause
 //! a query to be solved twice.
 
-use std::fs::{self, File, OpenOptions};
-use std::os::fd::AsRawFd;
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -25,9 +24,7 @@ pub struct KeyLock {
 
 impl Drop for KeyLock {
     fn drop(&mut self) {
-        unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
+        let _ = self.file.unlock();
     }
 }
 
@@ -41,17 +38,10 @@ fn key_path(cache_dir: &Path, key: &Key) -> PathBuf {
     lock_dir(cache_dir).join(&hex[..2]).join(hex.as_str())
 }
 
-fn flock(file: &File, op: libc::c_int) -> std::io::Result<()> {
-    loop {
-        let r = unsafe { libc::flock(file.as_raw_fd(), op) };
-        if r == 0 {
-            return Ok(());
-        }
-        let e = std::io::Error::last_os_error();
-        if e.kind() != std::io::ErrorKind::Interrupted {
-            return Err(e);
-        }
-    }
+/// Opens a lock file, creating it and its directory if needed.
+fn open_lock_file(path: &Path) -> std::io::Result<File> {
+    fs::create_dir_all(path.parent().expect("lock path has a parent"))?;
+    OpenOptions::new().create(true).truncate(false).write(true).open(path)
 }
 
 /// The result of [`acquire`].
@@ -71,11 +61,7 @@ pub enum Acquired {
 /// [`Acquired::Lock`] the caller solves without the lock.
 pub fn acquire(cache_dir: &Path, key: &Key, max_wait: Duration, mut on_busy: impl FnMut()) -> Acquired {
     let path = key_path(cache_dir, key);
-    let open = || -> std::io::Result<File> {
-        fs::create_dir_all(path.parent().expect("lock path has a parent"))?;
-        OpenOptions::new().create(true).truncate(false).write(true).open(&path)
-    };
-    let file = match open() {
+    let file = match open_lock_file(&path) {
         Ok(f) => f,
         Err(e) => {
             log!("no in-flight lock ({}): {e}", path.display());
@@ -86,9 +72,9 @@ pub fn acquire(cache_dir: &Path, key: &Key, max_wait: Duration, mut on_busy: imp
     let mut pause = Duration::from_millis(5);
     let mut waited = false;
     loop {
-        match flock(&file, libc::LOCK_EX | libc::LOCK_NB) {
+        match file.try_lock() {
             Ok(()) => return Acquired::Lock(KeyLock { file, waited }),
-            Err(e) if e.raw_os_error() == Some(libc::EWOULDBLOCK) => {
+            Err(TryLockError::WouldBlock) => {
                 if !waited {
                     on_busy();
                 }
@@ -101,7 +87,7 @@ pub fn acquire(cache_dir: &Path, key: &Key, max_wait: Duration, mut on_busy: imp
                 std::thread::sleep(pause.min(max_wait - elapsed));
                 pause = (pause * 2).min(Duration::from_millis(200));
             }
-            Err(e) => {
+            Err(TryLockError::Error(e)) => {
                 log!("no in-flight lock ({}): {e}", path.display());
                 return Acquired::Unavailable;
             }
@@ -145,7 +131,7 @@ pub fn clean(cache_dir: &Path, older_than: Duration) -> Cleaned {
             let Ok(file) = OpenOptions::new().write(true).open(&path) else {
                 continue;
             };
-            if flock(&file, libc::LOCK_EX | libc::LOCK_NB).is_err() {
+            if file.try_lock().is_err() {
                 c.held += 1;
                 continue;
             }
@@ -161,10 +147,8 @@ pub fn clean(cache_dir: &Path, older_than: Duration) -> Cleaned {
 /// Takes `<dir>/locks/gc` without waiting, so that only one `gc` runs at a
 /// time. `None` if another holds it or it cannot be created.
 pub fn try_gc_lock(cache_dir: &Path) -> Option<File> {
-    let path = lock_dir(cache_dir).join("gc");
-    fs::create_dir_all(lock_dir(cache_dir)).ok()?;
-    let file = OpenOptions::new().create(true).truncate(false).write(true).open(path).ok()?;
-    flock(&file, libc::LOCK_EX | libc::LOCK_NB).ok()?;
+    let file = open_lock_file(&lock_dir(cache_dir).join("gc")).ok()?;
+    file.try_lock().ok()?;
     Some(file)
 }
 

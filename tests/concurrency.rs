@@ -6,30 +6,23 @@ mod common;
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::time::{Duration, Instant};
 
 use common::*;
+use z3cache::store::{FILE_NAME, SqliteStore};
 
 const PROXY_ARGS: &[&str] = &["-smt2", "-in"];
 
 fn spawn(cache: &Path, log: &Path, input: &[u8], extra: &[(&str, &OsStr)]) -> Child {
-    let mut cmd = Command::new(z3cache());
-    cmd.args(PROXY_ARGS)
-        .env("Z3CACHE_REAL_Z3", stub())
-        .env("Z3CACHE_DIR", cache)
-        .env("Z3STUB_LOG", log)
-        .env_remove("Z3CACHE_MODE")
-        .env_remove("Z3CACHE_RECORD")
-        .env_remove("Z3CACHE_STORE")
-        .env_remove("Z3CACHE_VERIFY")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    for (k, v) in extra {
-        cmd.env(k, v);
-    }
-    let mut child = cmd.spawn().unwrap();
+    let stub = stub();
+    let mut env = vec![
+        ("Z3CACHE_REAL_Z3", stub.as_os_str()),
+        ("Z3CACHE_DIR", cache.as_os_str()),
+        ("Z3STUB_LOG", log.as_os_str()),
+    ];
+    env.extend_from_slice(extra);
+    let mut child = proxy_command(&z3cache(), PROXY_ARGS, &env).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let input = input.to_vec();
     std::thread::spawn(move || {
@@ -38,14 +31,8 @@ fn spawn(cache: &Path, log: &Path, input: &[u8], extra: &[(&str, &OsStr)]) -> Ch
     child
 }
 
-fn counter(cache: &Path, name: &str) -> i64 {
-    let conn = rusqlite::Connection::open(cache.join("cache-v1.sqlite3")).unwrap();
-    conn.query_row("SELECT coalesce(sum(n), 0) FROM counters WHERE name = ?1", [name], |r| r.get(0))
-        .unwrap()
-}
-
 fn integrity_ok(cache: &Path) {
-    let conn = rusqlite::Connection::open(cache.join("cache-v1.sqlite3")).unwrap();
+    let conn = rusqlite::Connection::open(cache.join(FILE_NAME)).unwrap();
     let r: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
     assert_eq!(r, "ok");
 }
@@ -108,14 +95,6 @@ fn a_failing_holder_does_not_stop_the_waiters() {
     }
     assert_eq!(counter(&cache, "misses"), 4);
     assert_eq!(counter(&cache, "hits"), 0);
-}
-
-fn many_queries(offset: usize, n: usize) -> Vec<u8> {
-    let mut s = String::from("(declare-const x Int)\n");
-    for i in offset..offset + n {
-        s.push_str(&format!("(push)(assert (> x {i}))(check-sat)(pop)\n"));
-    }
-    s.into_bytes()
 }
 
 #[test]
@@ -186,10 +165,8 @@ fn gc_while_sessions_run() {
     integrity_ok(&cache);
     let gc = run(&z3cache(), &["gc"], b"", &[("Z3CACHE_DIR", cache.as_os_str()), small]);
     assert_eq!(gc.code, 0);
-    let conn = rusqlite::Connection::open(cache.join("cache-v1.sqlite3")).unwrap();
-    let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap();
-    let size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
-    assert!(pages * size <= 96 * 1024, "{} bytes after gc", pages * size);
+    let bytes = SqliteStore::open_read_only(&cache).unwrap().db_bytes().unwrap();
+    assert!(bytes <= 96 * 1024, "{bytes} bytes after gc");
 }
 
 #[test]

@@ -5,6 +5,53 @@ use std::collections::BTreeMap;
 
 use crate::FORMAT_VERSION;
 
+/// A query's outcome, read from the first line of its response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Sat,
+    Unsat,
+    Unknown,
+    /// Any other first line.
+    Other,
+    /// The response reported an error.
+    Error,
+}
+
+impl Verdict {
+    /// The verdict of a response that reports no error.
+    pub fn of(response: &[u8]) -> Verdict {
+        let first = response.split(|&b| b == b'\n').next().unwrap_or(b"");
+        match first.trim_ascii() {
+            b"sat" => Verdict::Sat,
+            b"unsat" => Verdict::Unsat,
+            b"unknown" => Verdict::Unknown,
+            _ => Verdict::Other,
+        }
+    }
+
+    /// `sat` or `unsat`.
+    pub fn is_definite(self) -> bool {
+        matches!(self, Verdict::Sat | Verdict::Unsat)
+    }
+
+    /// The name used in logs and records.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verdict::Sat => "sat",
+            Verdict::Unsat => "unsat",
+            Verdict::Unknown => "unknown",
+            Verdict::Other => "other",
+            Verdict::Error => "error",
+        }
+    }
+}
+
+impl std::fmt::Display for Verdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Inputs to every key that do not change during a session.
 #[derive(Debug, Clone)]
 pub struct KeyContext {
@@ -37,9 +84,8 @@ struct Frame {
     replay: Vec<Replay>,
     /// The option map when this frame was pushed.
     options_at_push: BTreeMap<Vec<u8>, OptionValue>,
-    /// The verdict of the latest query in this frame (`sat`, `unsat`,
-    /// `unknown`, `error` or `other`).
-    last_query: Option<&'static str>,
+    /// The verdict of the latest query in this frame.
+    last_query: Option<Verdict>,
 }
 
 impl Frame {
@@ -98,11 +144,12 @@ impl State {
     }
 
     /// Appends a silent command.
-    pub fn append(&mut self, canonical: &[u8]) {
+    pub fn append(&mut self, canonical: impl Into<Vec<u8>>) {
+        let canonical = canonical.into();
         let top = self.top();
-        put(&mut top.hasher, canonical);
+        put(&mut top.hasher, &canonical);
         top.replay.push(Replay {
-            command: canonical.to_vec(),
+            command: canonical,
             served: None,
             option: None,
         });
@@ -112,21 +159,27 @@ impl State {
     /// verdict is `verdict`. The response goes into the frame hash with the
     /// command: what follows a query (a read such as `get-model`, or a later
     /// query in the frame) depends on its answer, so its key must too.
-    pub fn append_query(&mut self, canonical: &[u8], served: &[u8], verdict: &'static str) {
+    pub fn append_query(
+        &mut self,
+        canonical: impl Into<Vec<u8>>,
+        served: impl Into<Vec<u8>>,
+        verdict: Verdict,
+    ) {
+        let (canonical, served) = (canonical.into(), served.into());
         let top = self.top();
-        put(&mut top.hasher, canonical);
+        put(&mut top.hasher, &canonical);
         put(&mut top.hasher, b"z3cache/served");
-        put(&mut top.hasher, served);
+        put(&mut top.hasher, &served);
         top.replay.push(Replay {
-            command: canonical.to_vec(),
-            served: Some(served.to_vec()),
+            command: canonical,
+            served: Some(served),
             option: None,
         });
         top.last_query = Some(verdict);
     }
 
     /// The verdict of the latest query still on the path, if any.
-    pub fn last_query_verdict(&self) -> Option<&'static str> {
+    pub fn last_query_verdict(&self) -> Option<Verdict> {
         self.frames.iter().rev().find_map(|f| f.last_query)
     }
 
@@ -281,8 +334,8 @@ mod tests {
         while let Some(cmd) = s.next_command() {
             let cmd = cmd.unwrap();
             match classify(&cmd, &Z3) {
-                Class::Silent => state.append(&cmd.canonical),
-                Class::Query => state.append_query(&cmd.canonical, b"unsat\n", "unsat"),
+                Class::Silent => state.append(cmd.canonical),
+                Class::Query => state.append_query(cmd.canonical, b"unsat\n", Verdict::Unsat),
                 Class::Push(n) => state.push(n),
                 Class::Pop(n) => state.pop(n).unwrap(),
                 Class::SetOption { name, value } => {
@@ -403,12 +456,12 @@ mod tests {
     fn last_query_verdict_follows_the_path() {
         let mut st = State::new();
         assert_eq!(st.last_query_verdict(), None);
-        st.append_query(b"(check-sat)", b"unsat\n", "unsat");
+        st.append_query(b"(check-sat)", b"unsat\n", Verdict::Unsat);
         st.push(1);
-        st.append_query(b"(check-sat)", b"sat\n", "sat");
-        assert_eq!(st.last_query_verdict(), Some("sat"));
+        st.append_query(b"(check-sat)", b"sat\n", Verdict::Sat);
+        assert_eq!(st.last_query_verdict(), Some(Verdict::Sat));
         st.pop(1).unwrap();
-        assert_eq!(st.last_query_verdict(), Some("unsat"));
+        assert_eq!(st.last_query_verdict(), Some(Verdict::Unsat));
         assert_eq!(st.replay(0)[0].served.as_deref(), Some(&b"unsat\n"[..]));
     }
 
@@ -417,7 +470,7 @@ mod tests {
         let after = |answer: &[u8]| {
             let mut st = State::new();
             st.append(b"(assert a)");
-            st.append_query(b"(check-sat)", answer, "x");
+            st.append_query(b"(check-sat)", answer, Verdict::Other);
             st.hashes(&ctx(), b"(get-model)").key
         };
         assert_ne!(after(b"sat\n"), after(b"unsat\n"));

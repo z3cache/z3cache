@@ -153,7 +153,8 @@ impl SqliteStore {
     }
 }
 
-fn u64_to_sql(v: u64) -> i64 {
+/// A count or size as an SQLite integer, saturating at `i64::MAX`.
+pub(crate) fn u64_to_sql(v: u64) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
 }
 
@@ -329,9 +330,7 @@ mod tests {
     use super::*;
 
     fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("z3cache-store-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        d
+        crate::test_dir("store", name)
     }
 
     fn entry(response: &[u8]) -> Entry {

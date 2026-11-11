@@ -13,9 +13,9 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::command::{Class, classify};
 use crate::config::{Config, Lifetime, Mode, StorePolicy};
@@ -25,8 +25,8 @@ use crate::profile::SolverProfile;
 use crate::record::{Record, Recorder, join_args};
 use crate::sexp::{Command, Splitter};
 use crate::solver::{Solver, hash_executable, solver_id};
-use crate::state::{Hashes, KeyContext, State};
-use crate::store::{Entry, Key, SolverInfo, SolverStamp, SqliteStore, Store, now_s};
+use crate::state::{Hashes, KeyContext, Replay, State, Verdict};
+use crate::store::{self, Entry, Key, SolverInfo, SolverStamp, SqliteStore, Store, now_s, u64_to_sql};
 
 /// What the caller of a step should do next.
 enum Step {
@@ -44,10 +44,10 @@ enum Step {
 /// The session must end with this exit code.
 struct Stop(i32);
 
-/// What the client-input thread hands to the session.
 /// Chunks of client input (at most 64 KiB each) queued ahead of the session.
 const INPUT_QUEUE: usize = 4;
 
+/// What the client-input thread hands to the session.
 enum Input {
     Data(Vec<u8>),
     End,
@@ -65,6 +65,57 @@ struct Live {
     /// The option values the solver has received. `pop` does not undo them
     /// (assumption A1), so they can differ from the client's.
     options: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+impl Live {
+    /// Adds to `batch` the client's command for every option whose value in
+    /// the solver differs, and notes the new value as sent. Returns whether
+    /// it added any.
+    fn sync_options(&mut self, state: &State, batch: &mut Vec<u8>) -> bool {
+        let mut added = false;
+        for (name, value, command) in state.options() {
+            if self.options.get(name).map(Vec::as_slice) != Some(value) {
+                push_line(batch, command);
+                self.options.insert(name.to_vec(), value.to_vec());
+                added = true;
+            }
+        }
+        added
+    }
+}
+
+/// Adds a command and its newline to a batch for the solver.
+fn push_line(batch: &mut Vec<u8>, cmd: &[u8]) {
+    batch.extend_from_slice(cmd);
+    batch.push(b'\n');
+}
+
+/// Adds a command followed by the sentinel command.
+fn push_framed(batch: &mut Vec<u8>, cmd: &[u8], sentinel: &[u8]) {
+    push_line(batch, cmd);
+    push_line(batch, sentinel);
+}
+
+/// Adds to `batch` the part of the path not yet sent, from the cursor `sent`
+/// (as in [`Live::sent`]), and advances the cursor: `(push)` for each frame
+/// not yet opened, and each unsent replay entry through `entry`.
+fn push_unsent(
+    state: &State,
+    sent: &mut Vec<usize>,
+    batch: &mut Vec<u8>,
+    mut entry: impl FnMut(&mut Vec<u8>, &Replay),
+) {
+    for i in 0..state.frame_count() {
+        if i >= sent.len() {
+            push_line(batch, b"(push)");
+            sent.push(0);
+        }
+        let replay = state.replay(i);
+        for r in &replay[sent[i]..] {
+            entry(batch, r);
+        }
+        sent[i] = replay.len();
+    }
 }
 
 #[derive(Default)]
@@ -88,32 +139,153 @@ struct Counts {
     audit_failures: i64,
 }
 
+impl Counts {
+    /// Each count with the counter name it is added to.
+    fn named(&self) -> [(&'static str, i64); 13] {
+        [
+            ("hits", self.hits),
+            ("misses", self.misses),
+            ("stores", self.stores),
+            ("saved_us", self.saved_us),
+            ("solver_starts", self.solver_starts),
+            ("replay_mismatches", self.replay_mismatches),
+            ("lock_waits", self.lock_waits),
+            ("lock_hits", self.lock_hits),
+            ("lock_timeouts", self.lock_timeouts),
+            ("audits", self.audits),
+            ("audit_contradictions", self.audit_contradictions),
+            ("audit_instabilities", self.audit_instabilities),
+            ("audit_failures", self.audit_failures),
+        ]
+    }
+}
+
+/// What a session adds to the store's counters at exit.
+fn session_counters(counts: &Counts, errored: bool, bypass: Option<&str>) -> Vec<(String, i64)> {
+    let mut counters = vec![
+        ("sessions".to_string(), 1),
+        ("errored_sessions".to_string(), i64::from(errored)),
+    ];
+    counters.extend(counts.named().map(|(name, n)| (name.to_string(), n)));
+    if let Some(reason) = bypass {
+        counters.push(("bypassed_sessions".into(), 1));
+        counters.push((format!("bypass: {reason}"), 1));
+    }
+    counters
+}
+
+/// The store as a session uses it. Any error disables it for the rest of the
+/// session (rule 2), and writes are skipped unless the mode is `rw`.
+struct SessionStore {
+    store: Option<SqliteStore>,
+    writable: bool,
+}
+
+impl SessionStore {
+    fn open(cfg: &Config) -> SessionStore {
+        let open = |dir: &Path| match cfg.mode {
+            // ro and enforce never write: no file, no migration (section 11).
+            Mode::Ro | Mode::Enforce => SqliteStore::open_read_only(dir),
+            _ => SqliteStore::open(dir),
+        };
+        let store = match &cfg.dir {
+            Some(dir) => match open(dir) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    log!("store disabled: cannot open {}: {e}", dir.display());
+                    None
+                }
+            },
+            None => {
+                log!("store disabled: no cache directory (set Z3CACHE_DIR)");
+                None
+            }
+        };
+        SessionStore {
+            store,
+            writable: cfg.mode == Mode::Rw,
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        self.store.is_some()
+    }
+
+    fn can_write(&self) -> bool {
+        self.writable && self.is_open()
+    }
+
+    /// The store, if it is open and may be written. Errors from it are the
+    /// caller's to handle.
+    fn writing(&mut self) -> Option<&mut SqliteStore> {
+        self.store.as_mut().filter(|_| self.writable)
+    }
+
+    /// Runs `op` on the store if it is open; an error disables the store.
+    fn with<T>(&mut self, op: impl FnOnce(&mut SqliteStore) -> store::Result<T>) -> Option<T> {
+        match op(self.store.as_mut()?) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                log!("store disabled: {e}");
+                self.store = None;
+                None
+            }
+        }
+    }
+
+    /// Like [`SessionStore::with`], for a write: skipped unless writable.
+    fn write<T>(&mut self, op: impl FnOnce(&mut SqliteStore) -> store::Result<T>) -> Option<T> {
+        if !self.writable {
+            return None;
+        }
+        self.with(op)
+    }
+
+    fn get(&mut self, key: &Key) -> Option<Entry> {
+        self.with(|s| s.get(key)).flatten()
+    }
+
+    /// Returns whether the entry was written.
+    fn put(&mut self, key: &Key, entry: &Entry) -> bool {
+        self.write(|s| s.put(key, entry)).is_some()
+    }
+
+    fn delete(&mut self, key: &Key) {
+        self.write(|s| s.delete(key));
+    }
+
+    fn solver(&mut self, stamp: &SolverStamp) -> Option<SolverInfo> {
+        self.with(|s| s.solver(stamp)).flatten()
+    }
+
+    fn put_solver(&mut self, stamp: &SolverStamp, info: &SolverInfo) {
+        self.write(|s| s.put_solver(stamp, info));
+    }
+}
+
 struct Session<'a> {
     profile: &'a dyn SolverProfile,
-    mode: Mode,
-    policy: StorePolicy,
-    lifetime: Lifetime,
-    /// Fraction of query hits to audit (section 13).
-    verify: f64,
-    gc_every: u32,
-    max_size: u64,
-    lock_wait: Duration,
+    cfg: &'a Config,
     /// While an in-flight lock is held, output for the client is kept here
     /// and written after the lock is released (section 10).
     deferred: Option<Vec<u8>>,
-    cache_dir: Option<PathBuf>,
     /// Random per session: the sentinel, audit sampling, eviction chance.
     nonce: [u8; 32],
     real: &'a Path,
     args: &'a [OsString],
+    /// An argument sets a wall-clock limit (section 7).
+    wall_clock_arg: bool,
     live: Option<Live>,
     state: State,
     splitter: Splitter,
-    /// `None` if the solver could not be identified: nothing is cached.
+    /// `None` if the solver could not be identified (nothing is cached), or
+    /// if there is neither a store nor a recorder to use keys.
     key_ctx: Option<KeyContext>,
     stamp: Option<SolverStamp>,
+    /// `None` if the solver could not be identified. Its `id` is zero if the
+    /// binary was not hashed because nothing uses keys (see [`run`]).
     solver_info: Option<SolverInfo>,
-    store: Option<SqliteStore>,
+    store: SessionStore,
     recorder: Option<Recorder>,
     sentinel_cmd: Vec<u8>,
     sentinel_lines: Vec<Vec<u8>>,
@@ -136,32 +308,27 @@ struct Session<'a> {
 /// Runs a proxy session on stdin/stdout and returns the exit code.
 pub fn run(cfg: &Config, profile: &dyn SolverProfile, real: &Path, args: &[OsString]) -> i32 {
     let started = Instant::now();
-    let open = |dir: &Path| match cfg.mode {
-        // ro and enforce never write: no file, no migration (section 11).
-        Mode::Ro | Mode::Enforce => SqliteStore::open_read_only(dir),
-        _ => SqliteStore::open(dir),
-    };
-    let mut store = match &cfg.dir {
-        Some(dir) => match open(dir) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                log!("store disabled: cannot open {}: {e}", dir.display());
-                None
-            }
-        },
-        None => {
-            log!("store disabled: no cache directory (set Z3CACHE_DIR)");
-            None
-        }
-    };
-    let stamp = SolverStamp::of(real).ok();
-    let solver_info = identify(real, stamp.as_ref(), &mut store, cfg.mode);
-    let key_ctx = solver_info.as_ref().map(|info| KeyContext {
-        solver_id: solver_id(&info.id, &cfg.solver_salt),
-        argv: args.iter().map(|a| a.as_encoded_bytes().to_vec()).collect(),
-    });
-
+    let mut store = SessionStore::open(cfg);
     let mut recorder = cfg.record.as_deref().and_then(Recorder::create);
+    let stamp = SolverStamp::of(real).ok();
+    // Keys are used only to look up, store and record. Without a store or a
+    // recorder the binary is not hashed; the identity then only remembers
+    // the version response for this session, and its `id` is never read.
+    let (solver_info, key_ctx) = if store.is_open() || recorder.is_some() {
+        let info = identify(real, stamp.as_ref(), &mut store);
+        let key_ctx = info.as_ref().map(|info| KeyContext {
+            solver_id: solver_id(&info.id, &cfg.solver_salt),
+            argv: args.iter().map(|a| a.as_encoded_bytes().to_vec()).collect(),
+        });
+        (info, key_ctx)
+    } else {
+        let unhashed = SolverInfo {
+            id: [0; 32],
+            version_response: None,
+        };
+        (Some(unhashed), None)
+    };
+
     if let Some(r) = &mut recorder {
         r.set("argv", join_args(args));
         r.set("real_solver", real.display());
@@ -172,20 +339,20 @@ pub fn run(cfg: &Config, profile: &dyn SolverProfile, real: &Path, args: &[OsStr
 
     let nonce = make_nonce();
     let sentinel = format!("z3cache-sentinel-{}", &blake3::Hash::from(nonce).to_hex()[..20]);
+    let wall_clock_arg = args.iter().any(|a| {
+        let a = a.as_encoded_bytes();
+        a.iter()
+            .position(|&c| c == b'=')
+            .is_some_and(|eq| profile.is_wall_clock_option(&a[..eq]))
+    });
     let mut s = Session {
         profile,
-        mode: cfg.mode,
-        policy: cfg.store_policy,
-        lifetime: cfg.lifetime,
-        verify: if cfg.mode == Mode::Rw { cfg.verify } else { 0.0 },
-        gc_every: cfg.gc_every,
-        max_size: cfg.max_size,
-        lock_wait: cfg.lock_wait,
+        cfg,
         deferred: None,
-        cache_dir: cfg.dir.clone(),
         nonce,
         real,
         args,
+        wall_clock_arg,
         live: None,
         state: State::new(),
         splitter: Splitter::new(),
@@ -219,21 +386,9 @@ pub fn run(cfg: &Config, profile: &dyn SolverProfile, real: &Path, args: &[OsStr
 }
 
 /// Finds the solver's identity, from the store if it has been seen before.
-fn identify(
-    real: &Path,
-    stamp: Option<&SolverStamp>,
-    store: &mut Option<SqliteStore>,
-    mode: Mode,
-) -> Option<SolverInfo> {
-    if let (Some(st), Some(stamp)) = (store.as_mut(), stamp) {
-        match st.solver(stamp) {
-            Ok(Some(info)) => return Some(info),
-            Ok(None) => {}
-            Err(e) => {
-                log!("store disabled: {e}");
-                *store = None;
-            }
-        }
+fn identify(real: &Path, stamp: Option<&SolverStamp>, store: &mut SessionStore) -> Option<SolverInfo> {
+    if let Some(info) = stamp.and_then(|stamp| store.solver(stamp)) {
+        return Some(info);
     }
     let id = match hash_executable(real) {
         Ok(id) => id,
@@ -246,22 +401,20 @@ fn identify(
         id,
         version_response: None,
     };
-    if mode == Mode::Rw
-        && let (Some(st), Some(stamp)) = (store.as_mut(), stamp)
-            && let Err(e) = st.put_solver(stamp, &info) {
-                log!("cannot record solver identity: {e}");
-            }
+    // Failing to record the identity only costs hashing it again next time:
+    // the store stays in use.
+    if let (Some(st), Some(stamp)) = (store.writing(), stamp)
+        && let Err(e) = st.put_solver(stamp, &info)
+    {
+        log!("cannot record solver identity: {e}");
+    }
     Some(info)
 }
 
 fn make_nonce() -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(&std::process::id().to_le_bytes());
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    h.update(&now.to_le_bytes());
+    h.update(&crate::since_epoch().as_nanos().to_le_bytes());
     let local = 0u8;
     h.update(&(&local as *const u8 as usize).to_le_bytes());
     *h.finalize().as_bytes()
@@ -276,47 +429,38 @@ fn sample(nonce: &[u8; 32], what: &[u8]) -> f64 {
     (n >> 11) as f64 / (1u64 << 53) as f64
 }
 
-fn is_definite(verdict: &str) -> bool {
-    verdict == "sat" || verdict == "unsat"
-}
-
-fn first_line_verdict(response: &[u8]) -> &'static str {
-    let first = response.split(|&b| b == b'\n').next().unwrap_or(b"");
-    match first.trim_ascii() {
-        b"sat" => "sat",
-        b"unsat" => "unsat",
-        b"unknown" => "unknown",
-        _ => "other",
-    }
+/// Reads client input on its own thread, so that a solver that dies while
+/// the client is quiet ends the session (section 14). The queue is bounded
+/// so that a solver that stops reading pushes back on the client through the
+/// pipes instead of growing memory without limit; dropping the receiver
+/// releases a blocked sender.
+fn read_client_input() -> Receiver<Input> {
+    let (tx, input) = mpsc::sync_channel(INPUT_QUEUE);
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 1 << 16];
+        loop {
+            match io::stdin().read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(Input::Data(buf[..n].to_vec())).is_err() {
+                        return;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    log!("reading stdin failed: {e}");
+                    break;
+                }
+            }
+        }
+        let _ = tx.send(Input::End);
+    });
+    input
 }
 
 impl Session<'_> {
     fn main_loop(&mut self) -> i32 {
-        // Client input arrives on its own thread, so that a solver that dies
-        // while the client is quiet ends the session (section 14). The queue
-        // is bounded so that a solver that stops reading pushes back on the
-        // client through the pipes instead of growing memory without limit;
-        // dropping the receiver releases a blocked sender.
-        let (tx, input) = mpsc::sync_channel(INPUT_QUEUE);
-        std::thread::spawn(move || {
-            let mut buf = vec![0u8; 1 << 16];
-            loop {
-                match io::stdin().read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if tx.send(Input::Data(buf[..n].to_vec())).is_err() {
-                            return;
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => {
-                        log!("reading stdin failed: {e}");
-                        break;
-                    }
-                }
-            }
-            let _ = tx.send(Input::End);
-        });
+        let input = read_client_input();
         loop {
             let data = match input.recv_timeout(IDLE_CHECK) {
                 Ok(Input::Data(d)) => d,
@@ -333,7 +477,7 @@ impl Session<'_> {
             }
             self.splitter.feed(&data);
             while let Some(next) = self.splitter.next_command() {
-                let mut step = match next {
+                let step = match next {
                     Ok(cmd) if self.passthrough.is_some() => self.forward(cmd),
                     Ok(cmd) => self.handle(cmd),
                     Err(e) => Step::Bypass {
@@ -342,33 +486,39 @@ impl Session<'_> {
                         raw: true,
                     },
                 };
-                loop {
-                    match step {
-                        Step::Continue => break,
-                        Step::Done(code) => return code,
-                        Step::Bypass { reason, trigger, raw } => {
-                            let framed = if self.passthrough.is_some() {
-                                !raw
-                            } else {
-                                match self.start_bypass(reason, raw) {
-                                    Ok(framed) => framed,
-                                    Err(Stop(code)) => return code,
-                                }
-                            };
-                            if !framed {
-                                self.passthrough = None;
-                                let mut pending = trigger.map(|c| c.raw).unwrap_or_default();
-                                pending.extend(self.splitter.take_remaining());
-                                return self.raw_pipe(pending, input);
-                            }
-                            step = match trigger {
-                                Some(cmd) => self.forward(cmd),
-                                None => Step::Continue,
-                            };
-                        }
-                    }
+                match self.follow(step) {
+                    Ok(None) => {}
+                    Ok(Some(pending)) => return self.raw_pipe(pending, input),
+                    Err(Stop(code)) => return code,
                 }
             }
+        }
+    }
+
+    /// Carries out what a step asks, through any switch to bypass. Returns
+    /// the bytes to start a raw pipe with if it comes to that.
+    fn follow(&mut self, mut step: Step) -> Result<Option<Vec<u8>>, Stop> {
+        loop {
+            let (reason, trigger, raw) = match step {
+                Step::Continue => return Ok(None),
+                Step::Done(code) => return Err(Stop(code)),
+                Step::Bypass { reason, trigger, raw } => (reason, trigger, raw),
+            };
+            let framed = if self.passthrough.is_some() {
+                !raw
+            } else {
+                self.start_bypass(reason, raw)?
+            };
+            if !framed {
+                self.passthrough = None;
+                let mut pending = trigger.map(|c| c.raw).unwrap_or_default();
+                pending.extend(self.splitter.take_remaining());
+                return Ok(Some(pending));
+            }
+            step = match trigger {
+                Some(cmd) => self.forward(cmd),
+                None => Step::Continue,
+            };
         }
     }
 
@@ -385,7 +535,7 @@ impl Session<'_> {
                 };
             }
             Class::Silent => {
-                self.state.append(&cmd.canonical);
+                self.state.append(cmd.canonical);
                 Ok(())
             }
             Class::Push(n) => {
@@ -410,16 +560,7 @@ impl Session<'_> {
             Class::Statistics => self.statistics(),
             Class::Query => self.lookup_or_solve(&cmd, true),
             Class::Read => self.lookup_or_solve(&cmd, false),
-            Class::Exit => {
-                let code = match &mut self.live {
-                    Some(live) => {
-                        let _ = live.solver.write(&cmd.raw);
-                        self.shutdown()
-                    }
-                    None => 0,
-                };
-                return Step::Done(code);
-            }
+            Class::Exit => return Step::Done(self.exit(&cmd)),
         };
         match result {
             // Section 7: after the solver reports an error, stop caching.
@@ -431,6 +572,14 @@ impl Session<'_> {
             Ok(()) => Step::Continue,
             Err(Stop(code)) => Step::Done(code),
         }
+    }
+
+    /// `exit`: passes it to the solver, if there is one, and shuts down.
+    fn exit(&mut self, cmd: &Command) -> i32 {
+        if let Some(live) = &mut self.live {
+            let _ = live.solver.write(&cmd.raw);
+        }
+        self.shutdown()
     }
 
     /// Discards solver frames the client has popped. `pop` does not undo
@@ -447,7 +596,7 @@ impl Session<'_> {
         if live.sent.len() <= frames {
             return Ok(());
         }
-        if self.lifetime == Lifetime::Fresh {
+        if self.cfg.lifetime == Lifetime::Fresh {
             // Section 7: the next miss gets a solver that has seen only the
             // path at that point.
             return self.discard_live();
@@ -455,15 +604,9 @@ impl Session<'_> {
         let mut batch = Vec::new();
         while live.sent.len() > frames {
             live.sent.pop();
-            batch.extend_from_slice(b"(pop)\n");
+            push_line(&mut batch, b"(pop)");
         }
-        for (name, value, command) in self.state.options() {
-            if live.options.get(name).map(Vec::as_slice) != Some(value) {
-                batch.extend_from_slice(command);
-                batch.push(b'\n');
-                live.options.insert(name.to_vec(), value.to_vec());
-            }
-        }
+        live.sync_options(&self.state, &mut batch);
         match live.solver.write(&batch) {
             Ok(()) => Ok(()),
             Err(_) => Err(Stop(self.solver_gone())),
@@ -476,9 +619,7 @@ impl Session<'_> {
         let Some(mut live) = self.live.take() else {
             return Ok(());
         };
-        live.solver.close_stdin();
-        let rest = live.solver.read_rest().concat();
-        let _ = live.solver.wait();
+        let (rest, _) = live.solver.finish();
         self.respond(&rest)
     }
 
@@ -496,8 +637,7 @@ impl Session<'_> {
             return self.respond_plain(&v);
         }
         self.materialize()?;
-        let mut sections = self.exchange(&[&cmd.canonical], Some(0))?;
-        let response = sections.remove(0).concat();
+        let response = self.ask(&cmd.canonical, true)?.concat();
         let clean = !self.has_error(&response);
         self.respond(&response)?;
         if clean {
@@ -511,14 +651,9 @@ impl Session<'_> {
             return;
         };
         info.version_response = Some(response);
-        if self.mode != Mode::Rw {
-            return;
+        if let Some(stamp) = &self.stamp {
+            self.store.put_solver(stamp, info);
         }
-        if let (Some(st), Some(stamp)) = (self.store.as_mut(), self.stamp.as_ref())
-            && let Err(e) = st.put_solver(stamp, info) {
-                log!("store disabled: {e}");
-                self.store = None;
-            }
     }
 
     fn statistics(&mut self) -> Result<(), Stop> {
@@ -526,83 +661,61 @@ impl Session<'_> {
             let out = self.profile.synthesize_statistics(self.rlimit);
             return self.respond(&out);
         }
-        let stats = self.profile.statistics_command();
-        let mut lines = self.exchange(&[stats], Some(0))?.remove(0);
+        let mut lines = self.ask(self.profile.statistics_command(), true)?;
         self.profile.rewrite_rlimit(&mut lines, self.rlimit);
         self.respond(&lines.concat())
     }
 
-    fn lookup(&mut self, key: &Key) -> Option<Entry> {
-        let store = self.store.as_mut()?;
-        match store.get(key) {
-            Ok(e) => e,
-            Err(e) => {
-                log!("store disabled: {e}");
-                self.store = None;
-                None
-            }
+    /// The store policy (section 7, rule 8), for both storing and serving:
+    /// whether an answer may come from or go to the store, given the verdict
+    /// of the query it is (or, for a read, of the latest query on the path).
+    /// Under `unsat`, this keeps an entry stored by an `all` session for a
+    /// failing query (or a read after one) from being used, so that failures
+    /// are re-solved as rule 8 intends.
+    fn policy_allows(&self, verdict: Option<Verdict>) -> bool {
+        match (self.cfg.store_policy, verdict) {
+            (_, Some(Verdict::Unsat)) => true,
+            (StorePolicy::All, Some(Verdict::Sat | Verdict::Unknown)) => !self.wall_clock_in_effect(),
+            _ => false,
         }
     }
 
-    /// Looks a key up and applies the session's store policy to what it
-    /// finds: under `unsat`, an entry stored by an `all` session for a
-    /// failing query (or a read after one) is not used, so that failures are
-    /// re-solved as rule 8 intends.
+    /// Looks a key up and applies the store policy to what it finds.
     fn accepted(&mut self, h: &Hashes, is_query: bool) -> Option<Entry> {
-        let e = self.lookup(h.key.as_bytes())?;
+        let e = self.store.get(h.key.as_bytes())?;
         if e.is_query != is_query {
             return None;
         }
-        if self.policy == StorePolicy::Unsat {
-            let unsat = if is_query {
-                first_line_verdict(&e.response) == "unsat"
-            } else {
-                self.state.last_query_verdict() == Some("unsat")
-            };
-            if !unsat {
-                return None;
-            }
-        }
-        Some(e)
+        let verdict = if is_query {
+            Some(Verdict::of(&e.response))
+        } else {
+            self.state.last_query_verdict()
+        };
+        self.policy_allows(verdict).then_some(e)
     }
 
     fn wall_clock_in_effect(&self) -> bool {
-        let option = self
-            .state
-            .options()
-            .any(|(name, _, _)| self.profile.is_wall_clock_option(name));
-        let argument = self.args.iter().any(|a| {
-            let a = a.as_encoded_bytes();
-            a.iter()
-                .position(|&c| c == b'=')
-                .is_some_and(|eq| self.profile.is_wall_clock_option(&a[..eq]))
-        });
-        option || argument
+        self.wall_clock_arg
+            || self
+                .state
+                .options()
+                .any(|(name, _, _)| self.profile.is_wall_clock_option(name))
     }
 
     /// Whether a solver response may be stored (section 7). `verdict` is the
-    /// query's own, or `-` for a read.
-    fn storable(&self, clean: bool, is_query: bool, response: &[u8], verdict: &str) -> bool {
-        if !clean || self.no_store || self.mode != Mode::Rw {
+    /// query's own, or `None` for a read. The store itself skips writes
+    /// outside `rw` mode.
+    fn storable(&self, clean: bool, is_query: bool, response: &[u8], verdict: Option<Verdict>) -> bool {
+        if !clean || self.no_store {
             return false;
         }
-        let last = if is_query {
-            verdict
-        } else {
-            match self.state.last_query_verdict() {
-                Some(v) => v,
-                None => return false,
-            }
-        };
-        let accepted = match self.policy {
-            StorePolicy::Unsat => last == "unsat",
-            StorePolicy::All => {
-                matches!(last, "sat" | "unsat" | "unknown")
-                    && (last == "unsat" || !self.wall_clock_in_effect())
-            }
-        };
+        let last = if is_query { verdict } else { self.state.last_query_verdict() };
         // A query's response is exactly its verdict line.
-        accepted && (!is_query || response == format!("{last}\n").as_bytes())
+        self.policy_allows(last) && (!is_query || last.is_some_and(|v| response == format!("{v}\n").as_bytes()))
+    }
+
+    fn verify(&self) -> f64 {
+        if self.cfg.mode == Mode::Rw { self.cfg.verify } else { 0.0 }
     }
 
     /// Writes a stored response. `count_hit` is false when a solver was
@@ -610,7 +723,7 @@ impl Session<'_> {
     fn answer_from_entry(
         &mut self,
         cmd: &Command,
-        hashes: Option<Hashes>,
+        h: Hashes,
         entry: Entry,
         start: Instant,
         count_hit: bool,
@@ -619,22 +732,20 @@ impl Session<'_> {
         self.respond_plain(&entry.response)?;
         if count_hit {
             self.counts.hits += 1;
-            self.counts.saved_us += i64::try_from(entry.solve_us).unwrap_or(i64::MAX);
+            self.counts.saved_us += u64_to_sql(entry.solve_us);
         }
-        if let Some(h) = hashes
-            && entry.last_used_s < now_s() - 86_400
-        {
+        if entry.last_used_s < now_s() - 86_400 {
             self.touched.push(*h.key.as_bytes());
         }
         let verdict = if entry.is_query {
             self.rlimit += entry.rlimit.unwrap_or(0);
-            let v = first_line_verdict(&entry.response);
-            self.state.append_query(&cmd.canonical, &entry.response, v);
-            v
+            let v = Verdict::of(&entry.response);
+            self.state.append_query(cmd.canonical.as_slice(), entry.response, v);
+            Some(v)
         } else {
-            "-"
+            None
         };
-        self.record(entry.is_query, hashes, verdict, start, if count_hit { "cache" } else { "audited" });
+        self.record(entry.is_query, Some(h), verdict, start, if count_hit { "cache" } else { "audited" });
         Ok(())
     }
 
@@ -648,13 +759,14 @@ impl Session<'_> {
         start: Instant,
         after_lock: bool,
     ) -> Result<(), Stop> {
-        if entry.is_query && self.verify > 0.0 && sample(&self.nonce, h.key.as_bytes()) < self.verify {
+        let verify = self.verify();
+        if entry.is_query && verify > 0.0 && sample(&self.nonce, h.key.as_bytes()) < verify {
             return self.audited_hit(cmd, h, entry, start);
         }
         if after_lock {
             self.counts.lock_hits += 1;
         }
-        self.answer_from_entry(cmd, Some(h), entry, start, true)
+        self.answer_from_entry(cmd, h, entry, start, true)
     }
 
     fn lookup_or_solve(&mut self, cmd: &Command, is_query: bool) -> Result<(), Stop> {
@@ -672,11 +784,21 @@ impl Session<'_> {
         // Section 10: take the in-flight lock before starting any solver,
         // then look again: another session may have stored the answer while
         // this one waited, or just before it took the lock.
-        let lock = match (&self.cache_dir, hashes) {
-            (Some(dir), Some(h)) if self.mode == Mode::Rw && self.store.is_some() => {
+        let cfg = self.cfg;
+        let lock = match (&cfg.dir, hashes) {
+            (Some(dir), Some(h)) if self.store.can_write() => {
                 let busy = || log!("in-flight lock busy for {}: waiting", h.key.to_hex());
-                match lock::acquire(dir, h.key.as_bytes(), self.lock_wait, busy) {
-                    lock::Acquired::Lock(l) => Some(l),
+                match lock::acquire(dir, h.key.as_bytes(), cfg.lock_wait, busy) {
+                    lock::Acquired::Lock(l) => {
+                        if l.waited {
+                            self.counts.lock_waits += 1;
+                        }
+                        if let Some(entry) = self.accepted(&h, is_query) {
+                            drop(l);
+                            return self.serve_entry(cmd, h, entry, start, true);
+                        }
+                        Some(l)
+                    }
                     lock::Acquired::TimedOut => {
                         self.counts.lock_timeouts += 1;
                         None
@@ -686,15 +808,6 @@ impl Session<'_> {
             }
             _ => None,
         };
-        if let (Some(l), Some(h)) = (&lock, hashes) {
-            if l.waited {
-                self.counts.lock_waits += 1;
-            }
-            if let Some(entry) = self.accepted(&h, is_query) {
-                drop(lock);
-                return self.serve_entry(cmd, h, entry, start, true);
-            }
-        }
 
         // Nothing reaches the client while the lock is held, so a client
         // that stops reading cannot keep other sessions waiting: output is
@@ -714,13 +827,14 @@ impl Session<'_> {
     }
 
     /// The miss path: materialize, ask the solver, and store the answer if
-    /// the policy allows. Returns the response for the caller to write.
+    /// the policy allows. Returns the response for the caller to write, and
+    /// the query's verdict.
     fn solve_and_store(
         &mut self,
         cmd: &Command,
         is_query: bool,
         hashes: Option<Hashes>,
-    ) -> Result<(Vec<u8>, &'static str), Stop> {
+    ) -> Result<(Vec<u8>, Option<Verdict>), Stop> {
         self.counts.misses += 1;
         self.materialize()?;
         let solve_start = Instant::now();
@@ -742,27 +856,29 @@ impl Session<'_> {
             }
             (s[1].concat(), Some(delta))
         } else {
-            (self.exchange(&[&cmd.canonical], Some(0))?.remove(0).concat(), None)
+            (self.ask(&cmd.canonical, true)?.concat(), None)
         };
         let solve_us = solve_start.elapsed().as_micros() as u64;
         let clean = !self.has_error(&response);
 
         let verdict = if is_query {
             self.rlimit += delta.unwrap_or(0);
-            let v = if clean { first_line_verdict(&response) } else { "error" };
-            self.state.append_query(&cmd.canonical, &response, v);
+            let v = if clean { Verdict::of(&response) } else { Verdict::Error };
+            self.state.append_query(cmd.canonical.as_slice(), response.as_slice(), v);
             if let Some(live) = &mut self.live {
                 // The solver has the query: keep the cursor at the end.
                 if let Some(top) = live.sent.last_mut() {
                     *top += 1;
                 }
             }
-            v
+            Some(v)
         } else {
-            "-"
+            None
         };
 
-        if let (true, Some(h)) = (self.storable(clean, is_query, &response, verdict), hashes) {
+        if self.storable(clean, is_query, &response, verdict)
+            && let Some(h) = hashes
+        {
             let entry = Entry {
                 response: response.clone(),
                 is_query,
@@ -770,14 +886,8 @@ impl Session<'_> {
                 solve_us,
                 last_used_s: 0,
             };
-            if let Some(st) = self.store.as_mut() {
-                match st.put(h.key.as_bytes(), &entry) {
-                    Ok(()) => self.counts.stores += 1,
-                    Err(e) => {
-                        log!("store disabled: {e}");
-                        self.store = None;
-                    }
-                }
+            if self.store.put(h.key.as_bytes(), &entry) {
+                self.counts.stores += 1;
             }
         }
         Ok((response, verdict))
@@ -789,86 +899,55 @@ impl Session<'_> {
     /// contradicted entry.
     fn audited_hit(&mut self, cmd: &Command, h: Hashes, entry: Entry, start: Instant) -> Result<(), Stop> {
         self.counts.audits += 1;
-        let cached = first_line_verdict(&entry.response);
-        let (response, delta) = match self.audit(&cmd.canonical) {
-            Ok(r) => r,
+        let cached = Verdict::of(&entry.response);
+        let key_hex = h.key.to_hex();
+        let contradiction = match self.audit(&cmd.canonical) {
             Err(e) => {
                 self.counts.audit_failures += 1;
                 log!("audit failed ({e}); answering from the cache");
-                return self.answer_from_entry(cmd, Some(h), entry, start, false);
+                None
+            }
+            Ok((response, _)) if Verdict::of(&response) == cached => None,
+            Ok((response, delta)) => {
+                let now = Verdict::of(&response);
+                if cached.is_definite() && now.is_definite() {
+                    Some((response, delta, now))
+                } else {
+                    self.counts.audit_instabilities += 1;
+                    log!("audit: instability for {key_hex}: cached {cached}, now {now}; keeping the entry");
+                    None
+                }
             }
         };
-        let now = first_line_verdict(&response);
-        if now == cached {
-            return self.answer_from_entry(cmd, Some(h), entry, start, false);
-        }
-        let key_hex = h.key.to_hex();
-        if !(is_definite(cached) && is_definite(now)) {
-            self.counts.audit_instabilities += 1;
-            log!("audit: instability for {key_hex}: cached {cached}, now {now}; keeping the entry");
-            return self.answer_from_entry(cmd, Some(h), entry, start, false);
-        }
+        let Some((response, delta, now)) = contradiction else {
+            return self.answer_from_entry(cmd, h, entry, start, false);
+        };
         self.counts.audit_contradictions += 1;
         log!("audit: CONTRADICTION for {key_hex}: cached {cached}, now {now}; entry deleted");
-        if let Some(st) = self.store.as_mut()
-            && let Err(e) = st.delete(h.key.as_bytes())
-        {
-            log!("store disabled: {e}");
-            self.store = None;
-        }
+        self.store.delete(h.key.as_bytes());
         // Answered by a solver: a miss (rule 10).
         self.counts.misses += 1;
         self.rlimit += delta;
-        self.state.append_query(&cmd.canonical, &response, now);
+        self.state.append_query(cmd.canonical.as_slice(), response.as_slice(), now);
         self.respond(&response)?;
-        self.record(true, Some(h), now, start, "solver");
+        self.record(true, Some(h), Some(now), start, "solver");
         Ok(())
     }
 
     /// Solves `query` in a new solver after the whole current path. Returns
-    /// the response and its resource cost.
+    /// the response and its resource cost. Unlike [`Session::materialize`],
+    /// queries on the path are re-run without sentinels, and any error
+    /// fails the audit.
     fn audit(&mut self, query: &[u8]) -> Result<(Vec<u8>, u64), String> {
         let mut solver = Solver::spawn(self.real, self.args).map_err(|e| format!("cannot start: {e}"))?;
         let mut batch = Vec::new();
-        for i in 0..self.state.frame_count() {
-            if i > 0 {
-                batch.extend_from_slice(b"(push)\n");
-            }
-            for r in self.state.replay(i) {
-                batch.extend_from_slice(&r.command);
-                batch.push(b'\n');
-            }
-        }
+        push_unsent(&self.state, &mut vec![0], &mut batch, |batch, r| push_line(batch, &r.command));
         let stats = self.profile.statistics_command();
         for cmd in [&b""[..], stats, query, stats] {
-            batch.extend_from_slice(cmd);
-            batch.push(b'\n');
-            batch.extend_from_slice(&self.sentinel_cmd);
-            batch.push(b'\n');
+            push_framed(&mut batch, cmd, &self.sentinel_cmd);
         }
-        let result = (|| {
-            solver
-                .write(&batch)
-                .and_then(|_| solver.flush())
-                .map_err(|e| format!("cannot write: {e}"))?;
-            let mut sections = Vec::with_capacity(4);
-            for _ in 0..4 {
-                let r = solver.read_until(&self.sentinel_lines);
-                if r.eof {
-                    return Err("the audit solver exited".to_string());
-                }
-                sections.push(r.lines.concat());
-            }
-            if sections.iter().any(|s| self.has_error(s)) {
-                return Err("the audit solver reported an error".to_string());
-            }
-            let lines = |s: &[u8]| s.split_inclusive(|&b| b == b'\n').map(<[u8]>::to_vec).collect::<Vec<_>>();
-            let before = self.profile.parse_rlimit(&lines(&sections[1])).unwrap_or(0);
-            let after = self.profile.parse_rlimit(&lines(&sections[3])).unwrap_or(0);
-            Ok((sections.swap_remove(2), after.saturating_sub(before)))
-        })();
-        solver.close_stdin();
-        let _ = solver.wait();
+        let result = self.audit_exchange(&mut solver, &batch);
+        let _ = solver.finish();
         // The audit solver replaced the live one as the process to kill on a
         // signal.
         if let Some(live) = &self.live {
@@ -877,7 +956,34 @@ impl Session<'_> {
         result
     }
 
-    fn record(&mut self, is_query: bool, hashes: Option<Hashes>, verdict: &str, start: Instant, served: &str) {
+    /// Sends the audit's batch and reads its four sections: the path's
+    /// output, statistics, the query's response and statistics again.
+    fn audit_exchange(&self, solver: &mut Solver, batch: &[u8]) -> Result<(Vec<u8>, u64), String> {
+        solver.send(batch).map_err(|e| format!("cannot write: {e}"))?;
+        let mut sections = Vec::with_capacity(4);
+        for _ in 0..4 {
+            let r = solver.read_until(&self.sentinel_lines);
+            if r.eof {
+                return Err("the audit solver exited".to_string());
+            }
+            sections.push(r.lines);
+        }
+        if sections.iter().any(|s| s.iter().any(|l| self.profile.is_error_line(l))) {
+            return Err("the audit solver reported an error".to_string());
+        }
+        let before = self.profile.parse_rlimit(&sections[1]).unwrap_or(0);
+        let after = self.profile.parse_rlimit(&sections[3]).unwrap_or(0);
+        Ok((sections.swap_remove(2).concat(), after.saturating_sub(before)))
+    }
+
+    fn record(
+        &mut self,
+        is_query: bool,
+        hashes: Option<Hashes>,
+        verdict: Option<Verdict>,
+        start: Instant,
+        served: &str,
+    ) {
         self.seq += 1;
         if let Some(r) = &mut self.recorder {
             r.record(&Record {
@@ -905,7 +1011,7 @@ impl Session<'_> {
     /// served (a difference is a replay mismatch), while all other output,
     /// such as errors, is passed on complete.
     fn materialize(&mut self) -> Result<(), Stop> {
-        if self.mode == Mode::Enforce {
+        if self.cfg.mode == Mode::Enforce {
             let msg = b"(error \"z3cache: cache miss in enforce mode\")\n";
             let _ = self.respond_plain(msg);
             log!("enforce: cache miss");
@@ -929,56 +1035,38 @@ impl Session<'_> {
             }
         }
         let live = self.live.as_mut().expect("just started");
+        let sentinel = &self.sentinel_cmd;
         let mut batch = Vec::new();
         // One entry per sentinel: `None` for output to pass on, `Some` for a
         // re-run query's answer and what was served for it.
         let mut sections: Vec<Option<Vec<u8>>> = Vec::new();
-        let sentinel = |batch: &mut Vec<u8>| {
-            batch.extend_from_slice(&self.sentinel_cmd);
-            batch.push(b'\n');
-        };
-        for i in 0..self.state.frame_count() {
-            if i >= live.sent.len() {
-                batch.extend_from_slice(b"(push)\n");
-                live.sent.push(0);
+        push_unsent(&self.state, &mut live.sent, &mut batch, |batch, r| {
+            if let Some(served) = &r.served {
+                push_line(batch, sentinel);
+                sections.push(None);
+                push_framed(batch, &r.command, sentinel);
+                sections.push(Some(served.clone()));
+            } else {
+                push_line(batch, &r.command);
             }
-            let replay = self.state.replay(i);
-            for r in &replay[live.sent[i]..] {
-                if let Some(served) = &r.served {
-                    sentinel(&mut batch);
-                    sections.push(None);
-                    batch.extend_from_slice(&r.command);
-                    batch.push(b'\n');
-                    sentinel(&mut batch);
-                    sections.push(Some(served.clone()));
-                } else {
-                    batch.extend_from_slice(&r.command);
-                    batch.push(b'\n');
-                }
-                if let Some((name, value)) = &r.option {
-                    live.options.insert(name.clone(), value.clone());
-                }
+            if let Some((name, value)) = &r.option {
+                live.options.insert(name.clone(), value.clone());
             }
-            live.sent[i] = replay.len();
-        }
+        });
         // Replaying the path in order, with options reconciled at each pop
         // (pop_live), leaves the solver with the client's options. A
         // difference here would be a bug; log it and correct it rather than
         // answer under the wrong settings.
-        for (name, value, command) in self.state.options() {
-            if live.options.get(name).map(Vec::as_slice) != Some(value) {
-                log!("option drift: {}", String::from_utf8_lossy(command));
-                batch.extend_from_slice(command);
-                batch.push(b'\n');
-                live.options.insert(name.to_vec(), value.to_vec());
-            }
+        let replayed = batch.len();
+        if live.sync_options(&self.state, &mut batch) {
+            log!("option drift: {}", String::from_utf8_lossy(&batch[replayed..]).trim_end());
         }
         if batch.is_empty() {
             return Ok(());
         }
-        sentinel(&mut batch);
+        push_line(&mut batch, sentinel);
         sections.push(None);
-        if live.solver.write(&batch).and_then(|_| live.solver.flush()).is_err() {
+        if live.solver.send(&batch).is_err() {
             return Err(Stop(self.solver_gone()));
         }
         let mut replies = Vec::with_capacity(sections.len());
@@ -1023,12 +1111,9 @@ impl Session<'_> {
         let live = self.live.as_mut().expect("exchange needs a live solver");
         let mut batch = Vec::new();
         for c in cmds {
-            batch.extend_from_slice(c);
-            batch.push(b'\n');
-            batch.extend_from_slice(&self.sentinel_cmd);
-            batch.push(b'\n');
+            push_framed(&mut batch, c, &self.sentinel_cmd);
         }
-        if live.solver.write(&batch).and_then(|_| live.solver.flush()).is_err() {
+        if live.solver.send(&batch).is_err() {
             return Err(Stop(self.solver_gone()));
         }
         let mut sections = Vec::with_capacity(cmds.len());
@@ -1048,6 +1133,13 @@ impl Session<'_> {
             sections.push(resp.lines);
         }
         Ok(sections)
+    }
+
+    /// [`Session::exchange`] for one command; `visible` if the client asked
+    /// for it. Returns its response lines.
+    fn ask(&mut self, cmd: &[u8], visible: bool) -> Result<Vec<Vec<u8>>, Stop> {
+        let mut sections = self.exchange(&[cmd], visible.then_some(0))?;
+        Ok(sections.swap_remove(0))
     }
 
     /// Writes a solver's response to the client, noting any error it
@@ -1100,21 +1192,20 @@ impl Session<'_> {
     fn end_of_input(&mut self) -> i32 {
         self.incomplete_input = self.splitter.in_command();
         let rest = self.splitter.take_remaining();
-        if self.passthrough.is_some() {
-            if let Some(live) = &mut self.live {
-                let _ = live.solver.write(&rest);
-            }
-        } else if self.incomplete_input {
+        let forwarding = self.passthrough.is_some();
+        if !forwarding && self.incomplete_input {
             // A real solver would report the incomplete command.
             log!("input ended inside a command");
             if let Err(Stop(code)) = self.materialize() {
                 return code;
             }
-            if let Some(live) = &mut self.live {
-                let _ = live.solver.write(&rest);
-            }
         }
-        if self.live.is_some() { self.shutdown() } else { 0 }
+        if (forwarding || self.incomplete_input)
+            && let Some(live) = &mut self.live
+        {
+            let _ = live.solver.write(&rest);
+        }
+        self.shutdown()
     }
 
     /// Closes the solver's input, passes on its remaining output, and waits.
@@ -1123,12 +1214,8 @@ impl Session<'_> {
         let Some(mut live) = self.live.take() else {
             return 0;
         };
-        live.solver.close_stdin();
-        let rest = live.solver.read_rest().concat();
-        let code = live.solver.wait();
-        if !rest.is_empty() {
-            let _ = self.respond(&rest);
-        }
+        let (rest, code) = live.solver.finish();
+        let _ = self.respond(&rest);
         code
     }
 
@@ -1151,9 +1238,8 @@ impl Session<'_> {
         if raw || self.rlimit == 0 {
             return Ok(false);
         }
-        let stats = self.profile.statistics_command();
-        let s = self.exchange(&[stats], None)?;
-        let real = self.profile.parse_rlimit(&s[0]).unwrap_or(0);
+        let stats = self.ask(self.profile.statistics_command(), false)?;
+        let real = self.profile.parse_rlimit(&stats).unwrap_or(0);
         let offset = self.rlimit.saturating_sub(real);
         if offset == 0 {
             return Ok(false);
@@ -1170,46 +1256,42 @@ impl Session<'_> {
     fn forward(&mut self, cmd: Command) -> Step {
         self.commands += 1;
         let class = classify(&cmd, self.profile);
-        if let Class::Bypass(reason) = class {
-            return Step::Bypass {
-                reason,
-                trigger: Some(cmd),
-                raw: true,
-            };
-        }
-        let offset = self.passthrough.unwrap_or(0);
-        let live = self.live.as_mut().expect("bypass has a live solver");
         match class {
-            Class::Exit => {
-                let _ = live.solver.write(&cmd.raw);
-                return Step::Done(self.shutdown());
-            }
-            Class::Silent | Class::Push(_) | Class::Pop(_) | Class::SetOption { .. } => {
-                return match live.solver.write(&cmd.raw) {
-                    Ok(()) => Step::Continue,
-                    Err(_) => Step::Done(self.solver_gone()),
+            Class::Bypass(reason) => {
+                return Step::Bypass {
+                    reason,
+                    trigger: Some(cmd),
+                    raw: true,
                 };
             }
+            Class::Exit => return Step::Done(self.exit(&cmd)),
             _ => {}
+        }
+        let live = self.live.as_mut().expect("bypass has a live solver");
+        if matches!(class, Class::Silent | Class::Push(_) | Class::Pop(_) | Class::SetOption { .. }) {
+            return match live.solver.write(&cmd.raw) {
+                Ok(()) => Step::Continue,
+                Err(_) => Step::Done(self.solver_gone()),
+            };
         }
         // Everything else may answer, including commands outside the tables.
         let sent = live
             .solver
             .write(&cmd.raw)
-            .and_then(|_| live.solver.write(&self.sentinel_cmd))
-            .and_then(|_| live.solver.flush());
+            .and_then(|_| live.solver.send(&self.sentinel_cmd));
         if sent.is_err() {
             return Step::Done(self.solver_gone());
         }
         let resp = live.solver.read_until(&self.sentinel_lines);
         let mut lines = resp.lines;
-        if class == Class::Statistics && offset > 0 {
-            // Output before the response itself (errors from earlier
-            // commands) is left alone.
-            if let Some(start) = lines.iter().position(|l| l.starts_with(b"(:")) {
-                for l in &mut lines[start..] {
-                    self.profile.shift_rlimit(l, offset);
-                }
+        // Output before the response itself (errors from earlier commands)
+        // is left alone.
+        if class == Class::Statistics
+            && let Some(start) = lines.iter().position(|l| l.starts_with(b"(:"))
+        {
+            let offset = self.passthrough.unwrap_or(0);
+            for l in &mut lines[start..] {
+                self.profile.shift_rlimit(l, offset);
             }
         }
         // An echo's text is data, and here it shares a response with any
@@ -1279,43 +1361,20 @@ impl Session<'_> {
             r.set("wall_us", started.elapsed().as_micros());
             r.finish();
         }
-        if self.mode != Mode::Rw {
-            return;
-        }
-        let Some(store) = self.store.as_mut() else {
+        let Some(store) = self.store.writing() else {
             return;
         };
-        let c = &self.counts;
-        let mut counters: Vec<(String, i64)> = vec![
-            ("sessions".into(), 1),
-            ("hits".into(), c.hits),
-            ("misses".into(), c.misses),
-            ("stores".into(), c.stores),
-            ("saved_us".into(), c.saved_us),
-            ("solver_starts".into(), c.solver_starts),
-            ("replay_mismatches".into(), c.replay_mismatches),
-            ("errored_sessions".into(), i64::from(self.errored)),
-            ("lock_waits".into(), c.lock_waits),
-            ("lock_hits".into(), c.lock_hits),
-            ("lock_timeouts".into(), c.lock_timeouts),
-            ("audits".into(), c.audits),
-            ("audit_contradictions".into(), c.audit_contradictions),
-            ("audit_instabilities".into(), c.audit_instabilities),
-            ("audit_failures".into(), c.audit_failures),
-        ];
-        if let Some(reason) = &self.bypass {
-            counters.push(("bypassed_sessions".into(), 1));
-            counters.push((format!("bypass: {reason}"), 1));
-        }
+        let counters = session_counters(&self.counts, self.errored, self.bypass.as_deref());
         if let Err(e) = store.finish(&self.touched, &counters) {
             log!("cannot update counters: {e}");
         }
         // Section 9: one session in `gc_every` checks the size at exit and,
         // if the store is over its cap, starts `z3cache gc` in the
         // background, so that eviction never delays this session's exit.
-        let chosen = self.gc_every > 0
-            && u64::from_le_bytes(self.nonce[24..].try_into().expect("8 bytes")) % u64::from(self.gc_every) == 0;
-        if chosen && store.db_bytes().unwrap_or(0) > self.max_size {
+        let gc_every = self.cfg.gc_every;
+        let draw = u64::from_le_bytes(self.nonce[24..].try_into().expect("8 bytes"));
+        let chosen = gc_every > 0 && draw % u64::from(gc_every) == 0;
+        if chosen && store.db_bytes().unwrap_or(0) > self.cfg.max_size {
             match std::env::current_exe().and_then(|exe| {
                 std::process::Command::new(exe)
                     .arg0("z3cache")
@@ -1353,5 +1412,20 @@ fn pump(rx: Receiver<Vec<u8>>, mut rec: Option<BufWriter<File>>) {
     }
     if let Some(r) = &mut rec {
         let _ = r.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stats_shows_every_session_counter() {
+        for (name, _) in session_counters(&Counts::default(), true, Some("reason")) {
+            if name.starts_with("bypass: ") {
+                continue;
+            }
+            assert!(crate::cli::COUNTERS.iter().any(|(n, _)| *n == name), "{name} is not shown by stats");
+        }
     }
 }

@@ -4,7 +4,6 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 static LOG: OnceLock<Option<Mutex<File>>> = OnceLock::new();
 
@@ -16,9 +15,7 @@ pub fn init(path: Option<&Path>) {
 
 pub fn write(args: std::fmt::Arguments<'_>) {
     if let Some(Some(file)) = LOG.get() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
+        let now = crate::since_epoch();
         let line = format!(
             "{}.{:03} z3cache[{}] {}\n",
             now.as_secs(),

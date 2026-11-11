@@ -20,21 +20,18 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::log;
-use crate::state::Hashes;
+use crate::state::{Hashes, Verdict};
 
-/// Version 2 added `served`: `cache` or `solver`. Version 1 lacked it.
+/// Version 2 added `served`: `cache`, `audited` or `solver`. Version 1
+/// lacked it.
 pub const RECORDS_HEADER: &str =
     "# z3cache records v2\tseq\tkind\tdepth\tkey\tcontext\tquery\tverdict\tus\tserved";
 pub const RECORDS_HEADER_V1: &str = "# z3cache records v1\tseq\tkind\tdepth\tkey\tcontext\tquery\tverdict\tus";
 
 pub fn unix_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
+    crate::since_epoch().as_millis()
 }
 
 pub fn join_args(args: &[OsString]) -> String {
@@ -64,7 +61,8 @@ pub struct Record<'a> {
     pub kind: &'a str,
     pub depth: usize,
     pub hashes: Option<Hashes>,
-    pub verdict: &'a str,
+    /// The query's verdict; `None` for a read (written as `-`).
+    pub verdict: Option<Verdict>,
     pub us: u128,
     /// `cache` only if the response was written from a stored entry without
     /// consulting a solver; `audited` if it was written from an entry after
@@ -167,7 +165,7 @@ impl Recorder {
             hex(|h| h.key),
             hex(|h| h.context),
             hex(|h| h.query),
-            r.verdict,
+            r.verdict.map_or("-", Verdict::as_str),
             r.us,
             r.served
         );

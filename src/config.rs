@@ -73,6 +73,28 @@ fn non_empty(name: &str) -> Option<OsString> {
     env::var_os(name).filter(|v| !v.is_empty())
 }
 
+fn text(name: &str) -> Option<String> {
+    non_empty(name).map(|v| v.to_string_lossy().into_owned())
+}
+
+/// A numeric setting: `default` if unset; if invalid, `default` and a
+/// warning that ends with `fallback`, which describes the default.
+fn number<T>(
+    warnings: &mut Vec<String>,
+    name: &str,
+    parse: fn(&str) -> Option<T>,
+    default: T,
+    fallback: String,
+) -> T {
+    let Some(v) = text(name) else {
+        return default;
+    };
+    parse(&v).unwrap_or_else(|| {
+        warnings.push(format!("invalid {name} {v:?}; {fallback}"));
+        default
+    })
+}
+
 impl Config {
     pub fn from_env() -> Config {
         let mut warnings = Vec::new();
@@ -86,7 +108,6 @@ impl Config {
                 Mode::Rw
             }
         };
-        let text = |name: &str| non_empty(name).map(|v| v.to_string_lossy().into_owned());
         let store_policy = match text("Z3CACHE_STORE").as_deref() {
             None | Some("unsat") => StorePolicy::Unsat,
             Some("all") => StorePolicy::All,
@@ -103,34 +124,24 @@ impl Config {
                 Lifetime::Keep
             }
         };
-        let max_size = match text("Z3CACHE_MAX_SIZE") {
-            None => DEFAULT_MAX_SIZE,
-            Some(v) => parse_size(&v).unwrap_or_else(|| {
-                warnings.push(format!("invalid Z3CACHE_MAX_SIZE {v:?}; using 2G"));
-                DEFAULT_MAX_SIZE
-            }),
-        };
-        let verify = match text("Z3CACHE_VERIFY") {
-            None => 0.0,
-            Some(v) => parse_fraction(&v).unwrap_or_else(|| {
-                warnings.push(format!("invalid Z3CACHE_VERIFY {v:?}; auditing nothing"));
-                0.0
-            }),
-        };
-        let lock_wait = match text("Z3CACHE_LOCK_WAIT") {
-            None => DEFAULT_LOCK_WAIT,
-            Some(v) => parse_seconds(&v).unwrap_or_else(|| {
-                warnings.push(format!("invalid Z3CACHE_LOCK_WAIT {v:?}; using 60 seconds"));
-                DEFAULT_LOCK_WAIT
-            }),
-        };
-        let gc_every = match text("Z3CACHE_GC_EVERY") {
-            None => DEFAULT_GC_EVERY,
-            Some(v) => parse_count(&v).unwrap_or_else(|| {
-                warnings.push(format!("invalid Z3CACHE_GC_EVERY {v:?}; using 100"));
-                DEFAULT_GC_EVERY
-            }),
-        };
+        let w = &mut warnings;
+        let max_size = number(
+            w,
+            "Z3CACHE_MAX_SIZE",
+            parse_size,
+            DEFAULT_MAX_SIZE,
+            format!("using {}G", DEFAULT_MAX_SIZE >> 30),
+        );
+        let verify = number(w, "Z3CACHE_VERIFY", parse_fraction, 0.0, "auditing nothing".into());
+        let lock_wait = number(
+            w,
+            "Z3CACHE_LOCK_WAIT",
+            parse_seconds,
+            DEFAULT_LOCK_WAIT,
+            format!("using {} seconds", DEFAULT_LOCK_WAIT.as_secs()),
+        );
+        let gc_every =
+            number(w, "Z3CACHE_GC_EVERY", parse_count, DEFAULT_GC_EVERY, format!("using {DEFAULT_GC_EVERY}"));
         Config {
             real_z3: non_empty("Z3CACHE_REAL_Z3").map(PathBuf::from),
             mode,

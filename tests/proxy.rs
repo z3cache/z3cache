@@ -8,9 +8,10 @@ mod common;
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use common::*;
+use z3cache::store::FILE_NAME;
 
 const PROXY_ARGS: &[&str] = &["-smt2", "-in"];
 
@@ -31,15 +32,20 @@ impl Fixture {
         }
     }
 
-    /// Runs the proxy on the shared cache with extra environment.
-    fn run_env(&self, input: &[u8], extra: &[(&str, &OsStr)]) -> Run {
+    /// The environment for the proxy on the shared cache, plus `extra`.
+    fn env<'a>(&'a self, extra: &[(&'a str, &'a OsStr)]) -> Vec<(&'a str, &'a OsStr)> {
         let mut env = vec![
             ("Z3CACHE_REAL_Z3", self.stub.as_os_str()),
             ("Z3CACHE_DIR", self.cache.as_os_str()),
             ("Z3STUB_LOG", self.log.as_os_str()),
         ];
         env.extend_from_slice(extra);
-        run(&z3cache(), PROXY_ARGS, input, &env)
+        env
+    }
+
+    /// Runs the proxy on the shared cache with extra environment.
+    fn run_env(&self, input: &[u8], extra: &[(&str, &OsStr)]) -> Run {
+        run(&z3cache(), PROXY_ARGS, input, &self.env(extra))
     }
 
     fn run(&self, input: &[u8]) -> Run {
@@ -73,17 +79,15 @@ impl Fixture {
         )
     }
 
-    /// An all-time counter from `z3cache stats --json`.
+    /// An all-time counter of the shared cache.
     fn counter(&self, name: &str) -> i64 {
-        let json = self.cli(&["stats", "--json"]).text();
-        let all = &json[json.find("\"all_time\"").unwrap()..];
-        let at = all.find(&format!("\"{name}\": ")).unwrap() + name.len() + 4;
-        all[at..]
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>()
-            .parse()
-            .unwrap()
+        counter(&self.cache, name)
+    }
+
+    /// The proxy on the shared cache, not yet started, with extra
+    /// environment.
+    fn command(&self, extra: &[(&str, &OsStr)]) -> Command {
+        proxy_command(&z3cache(), PROXY_ARGS, &self.env(extra))
     }
 }
 
@@ -339,15 +343,7 @@ fn unusable_store_still_answers_correctly() {
 fn interactive_batches_do_not_wait_for_end_of_input() {
     // Like Verus: write a batch, read up to <<DONE>>, then write the next.
     let stub = stub();
-    let cache = temp_dir("interactive");
-    let mut child = Command::new(z3cache())
-        .args(PROXY_ARGS)
-        .env("Z3CACHE_REAL_Z3", &stub)
-        .env("Z3CACHE_DIR", &cache)
-        .env_remove("Z3CACHE_RECORD")
-        .env_remove("Z3CACHE_MODE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+    let mut child = proxy_command(&z3cache(), PROXY_ARGS, &[("Z3CACHE_REAL_Z3", stub.as_os_str())])
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -503,12 +499,17 @@ fn cli_stats_clear_doctor() {
     assert_eq!(f.cli(&["stats", "--bogus"]).code, 2);
 }
 
-fn read_single(dir: &Path, ext: &str) -> String {
-    let files: Vec<_> = std::fs::read_dir(dir)
+/// The files in `dir` with extension `ext`.
+fn files_with_ext(dir: &Path, ext: &str) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(ext))
-        .collect();
+        .collect()
+}
+
+fn read_single(dir: &Path, ext: &str) -> String {
+    let files = files_with_ext(dir, ext);
     assert_eq!(files.len(), 1, "{files:?}");
     std::fs::read_to_string(&files[0]).unwrap()
 }
@@ -546,11 +547,7 @@ fn record_with(input: &[u8], name: &str, answers: &str) -> PathBuf {
 }
 
 fn find(dir: &Path, ext: &str) -> PathBuf {
-    std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| p.extension().and_then(|e| e.to_str()) == Some(ext))
-        .unwrap()
+    files_with_ext(dir, ext).swap_remove(0)
 }
 
 #[test]
@@ -732,7 +729,7 @@ fn unknown_commands_bypass_raw_and_change_nothing() {
 }
 
 fn sqlite_state(dir: &Path) -> (i64, i64) {
-    let conn = rusqlite::Connection::open(dir.join("cache-v1.sqlite3")).unwrap();
+    let conn = rusqlite::Connection::open(dir.join(FILE_NAME)).unwrap();
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
     let entries: i64 = conn.query_row("SELECT count(*) FROM entry", [], |r| r.get(0)).unwrap();
     (version, entries)
@@ -751,7 +748,7 @@ fn read_only_modes_never_create_or_change_the_store() {
         // emptied, and is not used.
         f.run(b"(assert a)\n(check-sat)\n");
         {
-            let conn = rusqlite::Connection::open(f.cache.join("cache-v1.sqlite3")).unwrap();
+            let conn = rusqlite::Connection::open(f.cache.join(FILE_NAME)).unwrap();
             conn.execute_batch("PRAGMA user_version = 999;").unwrap();
         }
         let out = f.run_env(b"(assert a)\n(check-sat)\n", &env);
@@ -798,7 +795,7 @@ fn read_only_modes_leave_entries_and_schema_alone() {
     for mode in ["ro", "enforce"] {
         let f = Fixture::new(&format!("contract-{mode}"));
         f.run(b"(assert a)\n(check-sat)\n");
-        let before = std::fs::read(f.cache.join("cache-v1.sqlite3")).unwrap();
+        let before = std::fs::read(f.cache.join(FILE_NAME)).unwrap();
         let counters = f.cli(&["stats", "--json"]).text();
         let names = |dir: &Path| -> Vec<String> {
             let mut v: Vec<String> = std::fs::read_dir(dir)
@@ -815,11 +812,11 @@ fn read_only_modes_leave_entries_and_schema_alone() {
         for name in names(&f.cache) {
             assert!(
                 existing.contains(&name)
-                    || ["cache-v1.sqlite3-wal", "cache-v1.sqlite3-shm"].contains(&name.as_str()),
+                    || [format!("{FILE_NAME}-wal"), format!("{FILE_NAME}-shm")].contains(&name),
                 "{mode} created {name}"
             );
         }
-        assert_eq!(std::fs::read(f.cache.join("cache-v1.sqlite3")).unwrap(), before, "{mode}");
+        assert_eq!(std::fs::read(f.cache.join(FILE_NAME)).unwrap(), before, "{mode}");
         assert_eq!(sqlite_state(&f.cache), (1, 1));
         assert_eq!(f.cli(&["stats", "--json"]).text(), counters, "{mode} changed counters");
     }
@@ -854,17 +851,7 @@ fn read_only_modes_in_an_unwritable_directory_just_miss() {
 /// Starts the proxy with stdin held open, sends `input`, waits for `ready`
 /// on stdout, kills the solver, and requires the proxy to exit on its own.
 fn solver_death_while_idle(f: &Fixture, input: &[u8]) -> i32 {
-    let mut child = Command::new(z3cache())
-        .args(PROXY_ARGS)
-        .env("Z3CACHE_REAL_Z3", &f.stub)
-        .env("Z3CACHE_DIR", &f.cache)
-        .env("Z3STUB_LOG", &f.log)
-        .env_remove("Z3CACHE_MODE")
-        .env_remove("Z3CACHE_RECORD")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = f.command(&[]).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(input).unwrap();
     stdin.flush().unwrap();
@@ -920,13 +907,7 @@ fn input_is_not_buffered_without_limit_when_the_solver_stops_reading() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let stub = stub();
-    let mut child = Command::new(z3cache())
-        .args(PROXY_ARGS)
-        .env("Z3CACHE_REAL_Z3", &stub)
-        .env("Z3CACHE_DIR", temp_dir("backpressure"))
-        .env_remove("Z3CACHE_RECORD")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+    let mut child = proxy_command(&z3cache(), PROXY_ARGS, &[("Z3CACHE_REAL_Z3", stub.as_os_str())])
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -1105,15 +1086,6 @@ fn misses_take_a_lock_file_per_key() {
     assert_eq!(g.counter("stores"), 1);
 }
 
-/// Fills a store with `n` distinct unsat queries, one session.
-fn fill(f: &Fixture, n: usize) {
-    let mut input = String::from("(declare-const x Int)\n");
-    for i in 0..n {
-        input.push_str(&format!("(push)(assert (> x {i}))(check-sat)(pop)\n"));
-    }
-    f.run(input.as_bytes());
-}
-
 fn entry_count(cache: &Path) -> i64 {
     sqlite_state(cache).1
 }
@@ -1121,13 +1093,13 @@ fn entry_count(cache: &Path) -> i64 {
 #[test]
 fn gc_evicts_to_the_cap_and_cleans_old_locks() {
     let f = Fixture::new("gc");
-    fill(&f, 300);
+    f.run(&many_queries(0, 300));
     assert_eq!(entry_count(&f.cache), 300);
     // Recency has one-second resolution, so make it explicit: every entry
     // was last used two days ago, then one is used now (a hit refreshes
     // entries older than a day).
     {
-        let conn = rusqlite::Connection::open(f.cache.join("cache-v1.sqlite3")).unwrap();
+        let conn = rusqlite::Connection::open(f.cache.join(FILE_NAME)).unwrap();
         conn.execute("UPDATE entry SET last_used_s = strftime('%s', 'now') - 172800", [])
             .unwrap();
     }
@@ -1181,12 +1153,9 @@ fn some_sessions_start_eviction_at_exit() {
         ("Z3CACHE_GC_EVERY", OsStr::new("1")),
         ("Z3CACHE_MAX_SIZE", OsStr::new("1K")),
     ];
-    let mut input = String::from("(declare-const x Int)\n");
-    for i in 0..50 {
-        input.push_str(&format!("(push)(assert (> x {i}))(check-sat)(pop)\n"));
-    }
+    let input = many_queries(0, 50);
     let start = std::time::Instant::now();
-    let out = f.run_env(input.as_bytes(), &env);
+    let out = f.run_env(&input, &env);
     assert_eq!(out.code, 0);
     // The session itself does not wait for eviction; a background gc does
     // it shortly after.
@@ -1197,7 +1166,7 @@ fn some_sessions_start_eviction_at_exit() {
     }
     // Disabled with 0.
     let g = Fixture::new("gc-never");
-    g.run_env(input.as_bytes(), &[("Z3CACHE_GC_EVERY", OsStr::new("0")), env[1]]);
+    g.run_env(&input, &[("Z3CACHE_GC_EVERY", OsStr::new("0")), env[1]]);
     std::thread::sleep(std::time::Duration::from_millis(500));
     assert_eq!(entry_count(&g.cache), 50);
 }
@@ -1241,17 +1210,9 @@ fn a_holder_whose_client_stops_reading_does_not_block_waiters() {
     let waiter_log = dir.join("waiter.log");
     let mut input = "(assert stub-error)\n".repeat(10_000).into_bytes();
     input.extend_from_slice(b"(check-sat)\n");
-    let mut holder = Command::new(z3cache())
-        .args(PROXY_ARGS)
-        .env("Z3CACHE_REAL_Z3", &f.stub)
-        .env("Z3CACHE_DIR", &f.cache)
-        .env("Z3STUB_LOG", &holder_log)
-        .env("Z3STUB_ANSWERS", format!("gate:{}:unsat", gate.display()))
-        .env_remove("Z3CACHE_MODE")
-        .env_remove("Z3CACHE_RECORD")
-        .env_remove("Z3CACHE_LOG")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+    let answers = format!("gate:{}:unsat", gate.display());
+    let mut holder = f
+        .command(&[("Z3STUB_LOG", holder_log.as_os_str()), ("Z3STUB_ANSWERS", OsStr::new(&answers))])
         .spawn()
         .unwrap();
     let mut holder_in = holder.stdin.take().unwrap();
@@ -1296,18 +1257,8 @@ fn a_stopped_holder_delays_waiters_only_up_to_the_limit() {
     let f = Fixture::new("stopped-holder");
     let gate = f.log.parent().unwrap().join("never-opened");
     let input = b"(assert a)\n(check-sat)\n";
-    let mut holder = Command::new(z3cache())
-        .args(PROXY_ARGS)
-        .env("Z3CACHE_REAL_Z3", &f.stub)
-        .env("Z3CACHE_DIR", &f.cache)
-        .env("Z3STUB_LOG", &f.log)
-        .env("Z3STUB_ANSWERS", format!("gate:{}:unsat", gate.display()))
-        .env_remove("Z3CACHE_MODE")
-        .env_remove("Z3CACHE_RECORD")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let answers = format!("gate:{}:unsat", gate.display());
+    let mut holder = f.command(&[("Z3STUB_ANSWERS", OsStr::new(&answers))]).spawn().unwrap();
     holder.stdin.as_mut().unwrap().write_all(input).unwrap();
     wait_until("the holder is solving under its lock", || file_contains(&f.log, "(check-sat)"));
     unsafe { libc::kill(holder.id() as i32, libc::SIGSTOP) };

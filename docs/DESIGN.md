@@ -313,7 +313,8 @@ Tables:
   cost, the original solve time, and creation and last-use times.
 - `solver`: the identity of each Z3 binary (BLAKE3 of the executable),
   memoised by path, size and modification time so a binary is hashed once,
-  plus its `get-info :version` reply once seen.
+  plus its `get-info :version` reply once seen. With neither a store nor a
+  recording, the binary is not hashed at all.
 - `counters`: daily totals for `stats`.
 
 Behaviour:

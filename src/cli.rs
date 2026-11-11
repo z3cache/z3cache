@@ -16,7 +16,7 @@ use crate::config::{Config, find_real_solver};
 use crate::lock;
 use crate::profile::Z3;
 use crate::solver::hash_executable;
-use crate::store::{SolverStamp, SqliteStore, Store, day, now_s};
+use crate::store::{FILE_NAME, SolverStamp, SqliteStore, Store, day, now_s, u64_to_sql};
 
 pub const SUBCOMMANDS: &[&str] = &["analyze", "clear", "doctor", "gc", "help", "stats"];
 
@@ -82,16 +82,21 @@ fn analyze_cmd(dirs: &[OsString]) -> i32 {
     0
 }
 
+fn cache_dir(cfg: &Config) -> Result<&Path, String> {
+    cfg.dir.as_deref().ok_or_else(|| "no cache directory: set Z3CACHE_DIR".to_string())
+}
+
+fn store_exists(dir: &Path) -> bool {
+    dir.join(FILE_NAME).exists()
+}
+
 fn open_store(cfg: &Config) -> Result<SqliteStore, String> {
-    let dir = cfg
-        .dir
-        .as_ref()
-        .ok_or("no cache directory: set Z3CACHE_DIR")?;
+    let dir = cache_dir(cfg)?;
     SqliteStore::open(dir).map_err(|e| format!("cannot open the cache in {}: {e}", dir.display()))
 }
 
 /// Counter names shown by `stats`, with their labels.
-const COUNTERS: &[(&str, &str)] = &[
+pub(crate) const COUNTERS: &[(&str, &str)] = &[
     ("sessions", "sessions"),
     ("hits", "hits (answered from the cache)"),
     ("misses", "misses (answered by the solver)"),
@@ -175,13 +180,12 @@ fn json_period(m: &BTreeMap<String, i64>) -> String {
 
 fn stats(json: bool) -> i32 {
     let cfg = Config::from_env();
-    let Some(dir) = cfg.dir.as_ref() else {
-        eprintln!("z3cache: no cache directory: set Z3CACHE_DIR");
+    let Ok(dir) = cache_dir(&cfg).inspect_err(|e| eprintln!("z3cache: {e}")) else {
         return 1;
     };
-    if !dir.join(crate::store::FILE_NAME).exists() {
+    if !store_exists(dir) {
         if json {
-            println!("{{\"path\": {}, \"entries\": 0, \"bytes\": 0}}", json_str(&dir.join(crate::store::FILE_NAME).display().to_string()));
+            println!("{{\"path\": {}, \"entries\": 0, \"bytes\": 0}}", json_str(&dir.join(FILE_NAME).display().to_string()));
         } else {
             println!("no cache yet in {}", dir.display());
         }
@@ -217,7 +221,7 @@ fn stats(json: bool) -> i32 {
     }
     let mut o = String::new();
     let _ = writeln!(o, "cache    {}", store.path().display());
-    let _ = writeln!(o, "entries  {entries}, {:.1} MB", bytes as f64 / 1e6);
+    let _ = writeln!(o, "entries  {entries}, {}", mb(bytes));
     let _ = writeln!(o, "\n{:<34} {:>12} {:>12} {:>12}", "", "today", "7 days", "all time");
     let cell = |m: &BTreeMap<String, i64>, name: &str| {
         let n = m.get(name).copied().unwrap_or(0);
@@ -289,11 +293,10 @@ fn gc() -> i32 {
     for w in &cfg.warnings {
         eprintln!("z3cache: {w}");
     }
-    let Some(dir) = cfg.dir.as_ref() else {
-        eprintln!("z3cache: no cache directory: set Z3CACHE_DIR");
+    let Ok(dir) = cache_dir(&cfg).inspect_err(|e| eprintln!("z3cache: {e}")) else {
         return 1;
     };
-    if !dir.join(crate::store::FILE_NAME).exists() {
+    if !store_exists(dir) {
         println!("no cache yet in {}", dir.display());
         return 0;
     }
@@ -301,10 +304,10 @@ fn gc() -> i32 {
         println!("another z3cache gc is running");
         return 0;
     };
-    let mut store = match SqliteStore::open(dir) {
+    let mut store = match open_store(&cfg) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("z3cache: cannot open the cache: {e}");
+            eprintln!("z3cache: {e}");
             return 1;
         }
     };
@@ -336,7 +339,7 @@ fn gc() -> i32 {
         "locks    removed {} lock files unused for an hour; {} old ones are held",
         c.removed, c.held
     );
-    let counters = [("gc_deleted".to_string(), i64::try_from(deleted).unwrap_or(i64::MAX))];
+    let counters = [("gc_deleted".to_string(), u64_to_sql(deleted))];
     if let Err(e) = store.finish(&[], &counters) {
         eprintln!("z3cache: cannot update counters: {e}");
     }
@@ -378,7 +381,7 @@ fn doctor() -> i32 {
                 match SqliteStore::open(dir) {
                     Ok(mut s) => {
                         let n = s.count().map(|n| n.to_string()).unwrap_or_else(|e| format!("? ({e})"));
-                        println!("store         {}: {n} entries, {:.1} MB", s.path().display(), s.file_bytes() as f64 / 1e6);
+                        println!("store         {}: {n} entries, {}", s.path().display(), mb(s.file_bytes()));
                         store = Some(s);
                     }
                     Err(e) => {

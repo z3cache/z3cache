@@ -8,6 +8,7 @@ mod sqlite;
 use std::path::Path;
 
 pub use sqlite::{FILE_NAME, SqliteStore};
+pub(crate) use sqlite::u64_to_sql;
 
 pub type Key = [u8; 32];
 
@@ -110,10 +111,7 @@ pub trait Store {
 }
 
 pub fn now_s() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    crate::since_epoch().as_secs() as i64
 }
 
 /// `YYYY-MM-DD` (UTC) for a Unix time in seconds.
