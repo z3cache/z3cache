@@ -385,6 +385,18 @@ monotone, so the proxy owns the counter:
 
 Verus therefore reports the original solve cost for cached queries.
 
+The counter arithmetic is in `src/rlimit/counter.rs`: adding a query's cost,
+the bypass offset, and the shifted value, each saturating at the limits of
+`u64`. The session changes its counter and computes every value it gives the
+client only through these functions. The same file models a session as a
+sequence of events (a query answered, the live solver's own count changing,
+a statistics request, the start of bypass) and proves with Verus that, for
+every sequence, the values given to the client never decrease. The proof
+assumes A10 (section 16) and leaves out raw bypass forced by an unknown
+command, the exception above. Specifications are attributes under
+`cfg(verus_keep_ghost)`, which only Verus sets, so ordinary builds neither
+see them nor depend on Verus.
+
 ## 9. Store
 
 One SQLite file, `cache-v1.sqlite3`, in `Z3CACHE_DIR`, by default
@@ -736,6 +748,7 @@ hit takes a few microseconds.
 | A7 | Reading statistics around a query does not change the solver's answer | Differential tests; not checked systematically |
 | A8 | Only space, tab, line feed and carriage return separate tokens; other ASCII control bytes and DEL are errors outside literals and comments; inside string literals and quoted symbols they are kept, except NUL | Z3 4.16.0, every byte 0x00-0x1f and 0x7f in five positions: differential test `a8_control_bytes_are_read_as_z3_reads_them` |
 | A9 | `push`, `pop` (also `(pop 0)`) and `assert` discard the latest query's result; declarations, `(push 0)`, `echo`, reads, statistics and the allowlisted options do not | Z3 4.16.0, differential test `a9_what_discards_a_result` |
+| A10 | One Z3 process's own `rlimit-count` never decreases, across passing, failing and resource-limited queries, `pop`, and changes to `rlimit` | Z3 4.16.0, differential test `a10_rlimit_count_never_decreases` |
 
 ## 17. Solver profiles
 
@@ -823,7 +836,10 @@ entries apart in one store.
    that differ between variants differently from run to run, which changes
    the module's keys.
 
-Tiers 3 and 5 need a real Z3 or Verus and skip with a message when none is
+6. **Proofs** (`tests/proofs.rs`): Verus checks `src/rlimit/counter.rs`,
+   the proof of rule 7 (section 8), with the Z3 next to it.
+
+Tiers 3, 5 and 6 need a real Z3 or Verus and skip with a message when none is
 configured. Every test runs z3cache with `Z3CACHE_CONFIG` set to a path that
 does not exist, unless it writes its own config file, so the user's config
 file is never read, and with `Z3CACHE_REAL_Z3` set (to the stub unless a

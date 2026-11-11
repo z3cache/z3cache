@@ -27,6 +27,7 @@ use crate::lock::{self, KeyLock};
 use crate::log;
 use crate::profile::SolverProfile;
 use crate::record::{Record, Recorder, join_args};
+use crate::rlimit::counter;
 use crate::sexp::{Command, Splitter};
 use crate::solver::solver_id;
 use crate::state::{Hashes, KeyContext, State, Verdict};
@@ -426,7 +427,7 @@ impl<'a> Session<'a> {
             self.touched.push(*h.key.as_bytes());
         }
         let verdict = if entry.is_query {
-            self.rlimit += entry.rlimit.unwrap_or(0);
+            self.rlimit = counter::advance(self.rlimit, entry.rlimit.unwrap_or(0));
             let v = Verdict::of(&entry.response);
             self.state
                 .append_query(cmd.canonical.as_slice(), entry.response, v);
@@ -549,7 +550,7 @@ impl<'a> Session<'a> {
         let response = reply.text();
 
         let verdict = if is_query {
-            self.rlimit += delta.unwrap_or(0);
+            self.rlimit = counter::advance(self.rlimit, delta.unwrap_or(0));
             let v = if clean {
                 Verdict::of(&response)
             } else {

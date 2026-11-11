@@ -10,6 +10,7 @@ use super::{Next, Phase, Session, Stop};
 use crate::command::Class;
 use crate::log;
 use crate::record::Recorder;
+use crate::rlimit::counter;
 use crate::sexp::Command;
 
 impl Session<'_> {
@@ -69,7 +70,7 @@ impl Session<'_> {
         }
         let stats = self.ask(self.profile.statistics_command(), Output::Own)?;
         let real = self.profile.parse_rlimit(&stats.lines).unwrap_or(0);
-        Ok(self.rlimit.saturating_sub(real))
+        Ok(counter::bypass_offset(self.rlimit, real))
     }
 
     /// Framed bypass, command by command: the client's bytes go to the
@@ -90,7 +91,7 @@ impl Session<'_> {
             // An echo's text is data, and here it shares a response with any
             // earlier errors, which the solver's exit status still reflects.
             Class::Local => Output::Data,
-            Class::Statistics => Output::Statistics(Box::new(move |v| v.saturating_add(offset))),
+            Class::Statistics => Output::Statistics(Box::new(move |v| counter::shifted(v, offset))),
             _ => Output::Response,
         };
         let mut replies = self.exchange(vec![Section::client(&cmd.raw, output)])?;

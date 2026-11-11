@@ -155,7 +155,8 @@ pub fn rlimit_counts(out: &str) -> Vec<u64> {
     out.split(":rlimit-count ")
         .skip(1)
         .map(|rest| {
-            rest.chars()
+            rest.trim_start()
+                .chars()
                 .take_while(char::is_ascii_digit)
                 .collect::<String>()
                 .parse()

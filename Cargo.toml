@@ -16,5 +16,9 @@ libc = "0.2"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 toml = { version = "1.2.1", default-features = false, features = ["parse"] }
 
+[lints.rust]
+# Set only by Verus, which checks the proofs in src/rlimit/counter.rs.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)"] }
+
 [profile.release]
 debug = 1

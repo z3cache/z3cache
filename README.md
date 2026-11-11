@@ -220,6 +220,7 @@ cargo build --release
 cargo test                                                     # no Z3 needed
 Z3CACHE_REAL_Z3=/path/to/z3 cargo test --test differential     # against real Z3
 Z3CACHE_VERUS=/path/to/verus cargo test --test e2e             # with Verus
+Z3CACHE_VERUS=/path/to/verus cargo test --test proofs          # Verus proofs
 ```
 
 ## License

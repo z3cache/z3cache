@@ -7,6 +7,7 @@ use super::channel::{Channel, Output, Section, push_line};
 use super::live::push_unsent;
 use super::{Session, Stop};
 use crate::log;
+use crate::rlimit::counter;
 use crate::sexp::Command;
 use crate::state::{Hashes, Verdict};
 use crate::store::Entry;
@@ -63,7 +64,7 @@ impl Session<'_> {
         self.store.delete(h.key.as_bytes());
         // Answered by a solver: a miss (rule 10).
         self.counts.misses += 1;
-        self.rlimit += delta;
+        self.rlimit = counter::advance(self.rlimit, delta);
         self.state
             .append_query(cmd.canonical.as_slice(), response.as_slice(), now);
         self.write_client(&response)?;

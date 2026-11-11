@@ -6,6 +6,8 @@
 //! the recorded cost of each query, whether the answer came from the solver
 //! or the cache.
 
+pub mod counter;
+
 const KEY: &[u8] = b":rlimit-count";
 
 /// The `rlimit-count` value in a statistics response, if present.

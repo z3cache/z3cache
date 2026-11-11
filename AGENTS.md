@@ -34,7 +34,9 @@ tests pass.
 6. **Nothing is stored from a session after the solver reports an error.**
 7. **`rlimit-count` given to the client never decreases** (section 8). The
    one exception is a raw bypass forced by a command or option outside the
-   tables, where framing could hang the session; rule 2 comes first.
+   tables, where framing could hang the session; rule 2 comes first. The
+   counter changes only through `src/rlimit/counter.rs`, whose Verus proof
+   (`tests/proofs.rs`) must keep passing.
 8. **`unsat` is the only verdict stored by default.**
 9. **Solver-specific behaviour lives in the solver profile** (section 17), not
    in the engine.
@@ -79,6 +81,7 @@ cargo test                            # unit, stub-solver and concurrency tests
 Z3CACHE_REAL_Z3=/path/to/z3 cargo test --test differential   # corpus against real Z3
 Z3CACHE_REAL_Z3=/path/to/z3 cargo test --test random         # generated sessions
 Z3CACHE_VERUS=/path/to/verus cargo test --test e2e            # Verus end to end
+Z3CACHE_VERUS=/path/to/verus cargo test --test proofs         # Verus proofs in src/
 
 # Every tier at once (the Z3 next to verus is the real solver for e2e):
 Z3CACHE_REAL_Z3=/path/to/verus-dir/z3 Z3CACHE_VERUS=/path/to/verus-dir/verus cargo test
@@ -94,7 +97,7 @@ Tests use temporary cache directories and never touch the user's cache, and
 set `Z3CACHE_CONFIG` to a path that does not exist so that they never read
 the user's config file (`tests/common/mod.rs` does both).
 Without `Z3CACHE_REAL_Z3` (or a `z3` on `PATH`) and `Z3CACHE_VERUS`, the
-differential, random and e2e tests print `SKIPPED` and pass.
+differential, random, e2e and proofs tests print `SKIPPED` and pass.
 
 - `random` runs 300 sessions by default; set `Z3CACHE_RANDOM_SESSIONS` for a
   longer soak. A failure names the seed and prints the session.

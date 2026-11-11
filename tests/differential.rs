@@ -331,6 +331,32 @@ fn a8_control_bytes_are_read_as_z3_reads_them() {
     }
 }
 
+/// A10: one Z3 process's own `rlimit-count` never decreases, across
+/// queries that pass, fail and run out of resources, `pop`, and changes to
+/// the `rlimit` option. The proof of rule 7 (`src/rlimit/counter.rs`)
+/// assumes it for the solver that bypass forwards to.
+#[test]
+fn a10_rlimit_count_never_decreases() {
+    let z3 = require_z3!();
+    let stats = "(get-info :all-statistics)";
+    let input = format!(
+        "(set-option :rlimit 0)(declare-const x Int)(declare-fun f (Int) Int)\n{stats}\n\
+         (push)(assert (> x 0))(assert (< x 0))(check-sat){stats}(pop){stats}\n\
+         (push)(assert (> (f x) 0))(check-sat){stats}(pop){stats}\n\
+         (push)(assert (forall ((z Int)) (> (f (* z z)) (f z))))(assert (= (f 2) (f 4)))\
+         (set-option :rlimit 2000)(check-sat)(set-option :rlimit 0){stats}(pop){stats}\n\
+         (check-sat){stats}\n"
+    );
+    let out = run(&z3, ARGS, input.as_bytes(), &[]);
+    let counts = rlimit_counts(&out.text());
+    assert_eq!(counts.len(), 8, "{}", out.text());
+    assert!(
+        counts.windows(2).all(|w| w[0] <= w[1]),
+        "rlimit-count went down: {counts:?}"
+    );
+    assert!(counts[7] > counts[0], "no work was counted: {counts:?}");
+}
+
 /// A9 and review finding 3: what makes Z3 4.16 discard the result of its
 /// latest check-sat (a read then has nothing to read), and what does not.
 /// The proxy's state (`State::read_verdict`) discards it on at least the
