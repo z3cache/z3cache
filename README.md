@@ -63,6 +63,20 @@ z3cache stats
 To use the cache in every worktree, put the two `export` lines in your shell
 profile. To turn it off for one run, set `Z3CACHE_MODE=off`.
 
+### Or: a one-line alias
+
+If the Verus release directory is on your `PATH`, z3cache finds the `z3` next
+to `verus` by itself, and one alias in `~/.zshrc` or `~/.bashrc` is enough:
+
+```sh
+alias verus='VERUS_Z3_PATH="$HOME/.cargo/bin/z3cache" verus'
+```
+
+Aliases only apply to commands you type in an interactive shell. If your
+project runs Verus from a script, a Makefile or `cargo verus`, use the
+`export` lines above instead. To bypass the alias for one run, type
+`command verus`.
+
 ## Is it safe?
 
 A cache hit means that this exact Z3 binary once gave this answer to this
