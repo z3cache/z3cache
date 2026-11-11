@@ -38,6 +38,9 @@ pub struct Command {
     /// comments are included so that forwarding `raw` reproduces the input
     /// stream exactly.
     pub raw: Vec<u8>,
+    /// Offset in `raw` where the command itself starts, after the leading
+    /// whitespace and comments.
+    pub text_start: usize,
     /// Tokens joined by single spaces, with no space after `(` or before
     /// `)`, and comments dropped. String literals and quoted symbols are kept
     /// byte-exact.
@@ -48,6 +51,12 @@ pub struct Command {
 }
 
 impl Command {
+    /// The command exactly as the client wrote it, from its opening to its
+    /// closing parenthesis.
+    pub fn text(&self) -> &[u8] {
+        &self.raw[self.text_start..]
+    }
+
     /// The command name, if the first element is an atom.
     pub fn head(&self) -> Option<&[u8]> {
         self.items.first()?.atom()
@@ -179,9 +188,11 @@ impl Splitter {
                             return Some(match tokenize(&self.buf[self.cmd_start..end]) {
                                 Ok((canonical, items)) => {
                                     let raw = self.buf[self.consumed..end].to_vec();
+                                    let text_start = self.cmd_start - self.consumed;
                                     self.consumed = end;
                                     Ok(Command {
                                         raw,
+                                        text_start,
                                         canonical,
                                         items,
                                     })
@@ -479,6 +490,13 @@ mod tests {
         assert!(s.next_command().is_none());
         assert!(s.in_command());
         assert_eq!(s.take_remaining(), b"\n(assert (> x");
+    }
+
+    #[test]
+    fn text_is_the_command_as_written() {
+        let (cmds, _, _) = split_all(&[b"; c (\n  (get-value ((+  x\n 1)))"]);
+        assert_eq!(cmds[0].text(), b"(get-value ((+  x\n 1)))");
+        assert_eq!(cmds[0].canonical, b"(get-value ((+ x 1)))");
     }
 
     #[test]

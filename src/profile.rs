@@ -35,6 +35,11 @@ pub trait SolverProfile: Sync {
     /// True if a response line reports an error.
     fn is_error_line(&self, line: &[u8]) -> bool;
 
+    /// True if the solver's response repeats parts of the command as the
+    /// client wrote them, whitespace and comments included. Such commands are
+    /// keyed and sent as written rather than in canonical form.
+    fn echoes_input(&self, cmd: &crate::sexp::Command) -> bool;
+
     /// What the solver prints for `(echo <tok>)`, or `None` if `tok` is not
     /// a string literal.
     fn echo_response(&self, tok: &[u8]) -> Option<Vec<u8>>;
@@ -138,6 +143,11 @@ impl SolverProfile for Z3 {
             format!("{sentinel}\n").into_bytes(),
             format!("\"{sentinel}\"\n").into_bytes(),
         ]
+    }
+
+    fn echoes_input(&self, cmd: &crate::sexp::Command) -> bool {
+        // `get-value` prints each term as it appears in the input.
+        cmd.head() == Some(&b"get-value"[..])
     }
 
     fn is_error_line(&self, line: &[u8]) -> bool {

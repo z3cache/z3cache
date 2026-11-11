@@ -627,17 +627,11 @@ fn random_sessions_match_real_z3() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// BUG (ignored until fixed): Z3 prints each term of a `get-value` reply
-/// exactly as the client wrote it, whitespace and comments included. The
-/// proxy sends the solver the canonical form of the command, and keys
-/// ignore whitespace, so for a term written with extra spaces, newlines or a
-/// comment the proxy's reply differs from Z3's, cold (the solver saw the
-/// canonical text) and warm (the entry may have been stored for another
-/// spelling). Rule 1: the reply is not what Z3 gives for the client's bytes.
-/// Verus sends no `get-value`; the generator above keeps its terms
-/// canonical so that the randomized test covers everything else.
+/// Z3 prints each term of a `get-value` reply exactly as the client wrote it,
+/// whitespace and comments included, so the proxy must key and send
+/// `get-value` as written rather than in canonical form, cold and warm, and
+/// two spellings of the same term must not share an entry.
 #[test]
-#[ignore = "z3cache bug: get-value replies use the canonical form of the terms, Z3 echoes them as written"]
 fn get_value_echoes_the_terms_as_written() {
     let Some(z3) = real_z3() else {
         eprintln!("SKIPPED: no real Z3 (set Z3CACHE_REAL_Z3 or put z3 on PATH)");

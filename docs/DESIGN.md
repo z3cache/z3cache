@@ -110,7 +110,10 @@ symbols|` and `;` comments, and copes with commands split across reads.
 
 Each command has a **canonical form**: its tokens joined by single spaces, no
 space after `(` or before `)`, comments dropped, string literals and quoted
-symbols byte-exact. Hashing and replay use the canonical form. Two adjacent
+symbols byte-exact. Hashing and replay use the canonical form, except for
+commands whose response repeats the command's own text: Z3's `get-value`
+prints each term as the client wrote it, so `get-value` is keyed and sent
+exactly as written (the solver profile names such commands). Two adjacent
 non-parenthesis tokens with nothing between them (such as `abc"def"`) are a
 parse error, because the solver's reading of them is not obvious.
 
@@ -441,10 +444,18 @@ was new or only its context had changed. Projections are labelled as such.
 - **Added trust:** the proxy's parser and state tracking, BLAKE3, and everyone
   who can write to the cache directory. A forged entry is a forged proof.
 - **Solver history.** A miss runs in a solver that skipped cached queries and
-  popped frames. This cannot produce a false `unsat`, but it can move a query
-  near its resource limit to the other side of it, and it can change wording:
-  Z3 4.16.0 gives `:reason-unknown` as `canceled` after a push/pop and as
-  `max. resource limit exceeded` without one.
+  popped frames, and that may not have seen a `push` where plain Z3 would
+  have. This cannot produce a false `unsat`, but Z3's answers to failing or
+  borderline queries can depend on that history. Observed with Z3 4.16.0:
+  - a query near its resource limit can land on the other side of it;
+  - a quantified query with `smt.mbqi` off can be `unknown` instead of
+    `sat`, because Z3 preprocesses differently before its first `push`;
+  - `:reason-unknown` wording (`canceled` after a push/pop, `max. resource
+    limit exceeded` without one);
+  - the model returned after a failure. Verus reads the labels of failing
+    assertions from that model, so when a failure has several possible
+    counterexamples, the errors Verus reports can differ from a direct run.
+    Which proofs pass is unaffected.
 - **Bias.** With the default policy, a query that passes once is recorded as
   passing even if it would fail on another run. The cache hides proof
   instability; it does not create unsoundness.
@@ -493,6 +504,10 @@ hit takes a few microseconds.
   Keys built from the axioms Z3 actually used (its unsat core) would avoid
   this. On a large Verus project such misses cost at most about 10% of solver
   time, so they are not implemented.
+- **Verus nondeterminism.** For an enum whose variants have different named
+  fields, Verus 0.2026.10.26 emits the field accessors in an order that
+  varies between runs, so queries in that module miss even when nothing
+  changed. Tuple variants are not affected.
 - **Output kept under a lock.** Client output is held in memory while an
   in-flight lock is held (section 10), without a size cap. Verus prints
   nothing during a normal replay.
@@ -508,7 +523,7 @@ hit takes a few microseconds.
 | A3 | Verus reads only `rlimit-count` from statistics and accepts a one-entry list | A warm full run answered with synthesized statistics gave identical results |
 | A4 | Verus follows the protocol in section 2 | Recorded transcripts of full runs; output byte-identical to Z3 on every session |
 | A5 | Verus passes no arguments beyond `-smt2 -in` | Recorded invocations of full runs |
-| A6 | Verus-generated names are stable between identical runs | Repeated full runs give identical keys |
+| A6 | Verus emits the same commands for identical input | Mostly: repeated runs give identical keys, except that Verus 0.2026.10.26 orders the accessor declarations of enum variants with differing named fields differently from run to run (section 15) |
 | A7 | Reading statistics around a query does not change the solver's answer | Differential tests; not checked systematically |
 
 ## 17. Solver profiles

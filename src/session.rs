@@ -411,9 +411,17 @@ impl<'a> Session<'a> {
         self.answer_from_entry(cmd, h, entry, start, true)
     }
 
+    /// The form of a query or read that is keyed and sent to the solver: the
+    /// canonical form, or the client's text for commands whose response
+    /// echoes it.
+    fn wire<'c>(&self, cmd: &'c Command) -> &'c [u8] {
+        if self.profile.echoes_input(cmd) { cmd.text() } else { &cmd.canonical }
+    }
+
     fn lookup_or_solve(&mut self, cmd: &Command, is_query: bool) -> Result<(), Stop> {
         let start = Instant::now();
-        let hashes = self.key_ctx.as_ref().map(|k| self.state.hashes(k, &cmd.canonical));
+        let wire = self.wire(cmd);
+        let hashes = self.key_ctx.as_ref().map(|k| self.state.hashes(k, wire));
         if let Some(h) = hashes {
             if let Some(entry) = self.accepted(&h, is_query) {
                 return self.serve_entry(cmd, h, entry, start, false);
@@ -476,7 +484,7 @@ impl<'a> Session<'a> {
             let (reply, delta) = self.solve(&cmd.canonical)?;
             (reply, Some(delta))
         } else {
-            (self.ask(&cmd.canonical, Output::Response)?, None)
+            (self.ask(self.wire(cmd), Output::Response)?, None)
         };
         let solve_us = solve_start.elapsed().as_micros() as u64;
         let clean = reply.error.is_none();
