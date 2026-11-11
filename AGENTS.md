@@ -111,13 +111,15 @@ differential, random and e2e tests print `SKIPPED` and pass.
 Use a local build with Verus:
 
 ```
-VERUS_Z3_PATH=$PWD/target/release/z3cache Z3CACHE_REAL_Z3=/path/to/z3 verus …
+VERUS_Z3_PATH=$PWD/target/release/z3cache verus …
 z3cache stats            # what the cache answered
 z3cache doctor           # check the setup
 ```
 
-Verus distributions ship their own Z3 next to the `verus` binary; use that one
-as `Z3CACHE_REAL_Z3`.
+z3cache finds the Z3 that ships next to Verus by itself (DESIGN section 4);
+set `Z3CACHE_REAL_Z3` only to use another one. Tests never rely on that
+lookup unless they test it: `tests/common/mod.rs` sets `Z3CACHE_REAL_Z3` to
+the stub by default, and `setup` tests run against a temporary `HOME`.
 
 To measure what a cache would save, record each run into its own directory
 with an empty cache, then compare the runs:

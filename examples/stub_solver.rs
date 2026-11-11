@@ -11,6 +11,11 @@
 //! - `Z3STUB_LOG`: file to which the stub appends `launch <args>` when it
 //!   starts and the canonical form of every command it receives.
 //!
+//! Run as a file named `rust_verify`, the stub stands in for Verus's driver
+//! instead: it runs its arguments as a command, with the same stdin, stdout
+//! and stderr, and exits with that command's status. Tests use it as the
+//! parent process of z3cache (DESIGN section 4).
+//!
 //! Behaviour that matters to the proxy matches Z3: `echo` prints the string
 //! unquoted, errors are `(error "...")` lines, processing continues after an
 //! error, and the exit status is 1 if any error was reported.
@@ -24,6 +29,16 @@ fn main() {
     // Like a real solver, die quietly if the proxy goes away.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+    let mut argv = std::env::args_os();
+    let name = argv.next().unwrap_or_default();
+    if std::path::Path::new(&name).file_name() == Some("rust_verify".as_ref()) {
+        let program = argv.next().expect("rust_verify: no command");
+        let status = std::process::Command::new(program)
+            .args(argv)
+            .status()
+            .expect("rust_verify: cannot run the command");
+        std::process::exit(status.code().unwrap_or(1));
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut log = std::env::var_os("Z3STUB_LOG").map(|p| {

@@ -99,8 +99,38 @@ Terms:
 | Mode `off` (section 11) | `exec` the real Z3 |
 
 Invoked as `z3` (a symlink), z3cache never treats its arguments as a
-subcommand. The real Z3 is the `real_z3` setting (`Z3CACHE_REAL_Z3`), or else
-the first `z3` on `PATH` that is not z3cache itself.
+subcommand. Invoked as `z3cache` with no arguments while stdin is a terminal,
+it prints a short pointer to `z3cache setup` and `z3cache help` and exits 0,
+instead of starting a solver that would wait for input from the terminal.
+
+**Finding the real Z3.** Every invocation that needs the real Z3 (proxy and
+`exec` alike) takes the first of these that is an executable file and not
+z3cache itself (same device and inode):
+
+1. the `real_z3` setting (`Z3CACHE_REAL_Z3`). If it is set but is not an
+   executable file, or is z3cache, that is an error: an explicit setting is
+   never silently replaced;
+2. `z3` in the directory of the parent process's executable, symlinks
+   resolved. When Verus runs z3cache, the parent is Verus's driver
+   (`rust_verify`), which a Verus release keeps next to its own `z3`. The
+   executable comes from `/proc/<ppid>/exe` on Linux and `proc_pidpath` on
+   macOS;
+3. `z3` next to the first `verus` on `PATH`, symlinks resolved, for a Verus
+   run some other way (for example through a wrapper script);
+4. the first `z3` on `PATH`.
+
+Each rule is a few system calls, and any error in one (no parent, a parent
+that has exited, an unreadable `/proc`) only moves on to the next, so the
+lookup can neither fail nor hang a build (rule 2). If nothing is found,
+z3cache prints an error naming `z3cache setup` and `real_z3`, and exits 127
+as a shell does for a missing command. The rule that found the solver is
+written to the log, and `doctor` shows it.
+
+Rule 2 is what makes `VERUS_Z3_PATH` the only setting a user needs: it finds
+the `z3` of whichever Verus is running, so several Verus versions on one
+machine each get their own. Run from a shell, `doctor` has no Verus parent;
+it reports that no solver is reachable from there without treating it as a
+fault, unless `real_z3` is set and wrong.
 
 ## 5. Command handling
 
@@ -390,7 +420,7 @@ variable counts as unset.
 
 | Variable | File key | Values | Default |
 |---|---|---|---|
-| `Z3CACHE_REAL_Z3` | `real_z3` | Path to the real Z3 | First other `z3` on `PATH` |
+| `Z3CACHE_REAL_Z3` | `real_z3` | Path to the real Z3 | Found as in section 4 |
 | `Z3CACHE_DIR` | `dir` | Cache directory | Platform cache directory |
 | `Z3CACHE_MODE` | `mode` | `rw`, `ro`, `enforce`, `off` | `rw` |
 | `Z3CACHE_STORE` | `store` | `unsat`, `all` | `unsat` |
@@ -415,7 +445,7 @@ The file is a [TOML](https://toml.io) document. Only top-level keys are read:
 
 ```toml
 # ~/.config/z3cache/config.toml
-real_z3 = "~/verus/z3"
+real_z3 = "~/verus/z3"    # only if section 4's lookup cannot find it
 dir = "/var/cache/z3cache"
 max_size = "10G"
 verify = 0.05
@@ -467,6 +497,48 @@ Modes:
 
 ## 12. Command-line tools
 
+- `z3cache setup [--shell zsh|bash|fish] [--yes|--print] [--undo]`: makes
+  Verus run z3cache by setting `VERUS_Z3_PATH` in the user's shell startup
+  file. It reports the `verus` on `PATH` (its directory, the version from
+  `verus --version`, given at most 5 seconds and killed with its process
+  group after that, and whether a `z3` is next to it; without one, that
+  rule 2 of section 4 still finds Verus's `z3`), the z3cache binary
+  (`current_exe`, canonical), and the shell.
+  - **Shell:** `--shell`, else the parent process's executable if it is
+    zsh, bash or fish (the shell setup was typed in; a leading `-` is
+    ignored), else the file name of `$SHELL`. Setup says which and how.
+  - **File:** zsh `~/.zshenv`, which every zsh reads, so scripts and agents
+    get the setting too (`~/.zshrc` covers interactive shells only); bash
+    `~/.bashrc`, with a note on macOS that login shells read
+    `~/.bash_profile`; fish `${XDG_CONFIG_HOME:-~/.config}/fish/config.fish`.
+    Any other shell gets the POSIX line to add by hand.
+  - **Line:** `export VERUS_Z3_PATH="$HOME/<path>"` (fish:
+    `set -gx VERUS_Z3_PATH "$HOME/<path>"`), with `$HOME` when the binary
+    is under the home directory and the absolute path otherwise.
+  - **Block:** setup writes the line between `# >>> z3cache >>>` and
+    `# <<< z3cache <<<` and never changes anything outside the markers. A
+    block with the same line, or the same line anywhere in the file, means
+    setup is done and nothing changes; so does `VERUS_Z3_PATH` already
+    pointing at this binary. A block with another line is shown with its
+    replacement and replaced only when agreed. Markers that do not form one
+    block are left alone, and setup asks the user to fix them.
+  - **Writing:** only when stdin and stdout are terminals and the user
+    answers yes (the default) to the prompt, or with `--yes`. Otherwise, and
+    with `--print`, setup prints a ready-to-paste `echo '<line>' >> <file>`
+    instead (single quotes, so that `$HOME` is expanded when the shell
+    starts). A missing file (and its directory) is created; an existing one
+    is first copied to `<file>.z3cache-backup` unless that backup exists. A
+    new block is appended, so the rest of the file is untouched; a block
+    replaced or removed is written to a temporary file next to the target
+    and renamed over it, keeping the permissions, and through a symlink the
+    file it points at is replaced.
+  - **Check:** once the setting is in place, setup runs `doctor`'s cold and
+    warm query (below) with the solver found as in section 4, and reports
+    one line. It ends with the next steps: a new terminal (or `source` the
+    file), Verus as usual, `z3cache stats`.
+  - `--undo` removes the block from the same file, after asking in a
+    terminal unless `--yes`; without a terminal it only shows the block. No
+    block is not an error.
 - `z3cache stats [--all|--json]`: for today, the last 7 days and all time,
   the hit rate (hits over hits plus misses), hits, misses, solver time saved,
   sessions, solver starts and entries stored, with the entry count and size.
@@ -478,9 +550,10 @@ Modes:
   what was done.
 - `z3cache clear`: delete all entries.
 - `z3cache doctor`: show the config file and every setting with its source
-  (section 11), locate the real Z3, show its identity, check the cache
-  directory, and run one small query cold and warm. The query runs against a
-  temporary cache and without the config file.
+  (section 11), locate the real Z3 and how it was found (section 4), show its
+  identity, check the cache directory, and run one small query cold and
+  warm. The query runs against a temporary cache and without the config
+  file.
 - `z3cache analyze <record-dir>…`: compare recorded runs (see below).
 
 **Recording.** With `Z3CACHE_RECORD=<dir>`, each session saves its input and
@@ -618,7 +691,13 @@ entries apart in one store.
 2. **Stub solver** (`examples/stub_solver.rs`): a scripted stand-in for Z3
    that answers from a script and logs its launches. Covers lazy start,
    replay order, `pop` handling, bypass, policies, modes, the config file,
-   and "a warm run starts no solver".
+   and "a warm run starts no solver". Copied to a file named `rust_verify`,
+   the stub runs its arguments as a command, standing in for Verus's driver
+   as the parent process that section 4's lookup looks next to (a copy,
+   because the kernel reports a symlinked executable by its target, and a
+   script's process is its interpreter). `z3cache setup` runs against a
+   temporary `HOME` with a fake `verus` on `PATH`; a test-only variable,
+   `Z3CACHE_ASSUME_TTY=1`, lets tests answer its prompt on a pipe.
 3. **Differential:** a corpus of transcripts run through real Z3, the proxy
    cold and the proxy warm, under each store policy and solver lifetime.
    Output must match apart from statistics and error positions. The corpus
@@ -649,7 +728,9 @@ entries apart in one store.
    - `--time` reports the same resource totals cold and warm;
    - profiling sessions bypass, with the reason in `stats`;
    - `off`, `enforce` and `ro` modes; several threads; `analyze` on two
-     recorded runs.
+     recorded runs;
+   - only `VERUS_Z3_PATH` set, with no `real_z3` and no `z3` or `verus` on
+     `PATH`: z3cache finds the `z3` next to Verus's driver.
 
    Each sample module is written so that Verus emits the same commands on
    every run: Verus 0.2026.10.26 orders the accessors of named enum fields
@@ -659,7 +740,8 @@ entries apart in one store.
 Tiers 3 and 5 need a real Z3 or Verus and skip with a message when none is
 configured. Every test runs z3cache with `Z3CACHE_CONFIG` set to a path that
 does not exist, unless it writes its own config file, so the user's config
-file is never read.
+file is never read, and with `Z3CACHE_REAL_Z3` set (to the stub unless a
+test says otherwise), so that only tests of the lookup itself depend on it.
 
 ## 19. Prior art
 

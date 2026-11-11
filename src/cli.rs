@@ -12,13 +12,14 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use crate::analyze;
-use crate::config::{Config, FileStatus, Source, find_real_solver};
+use crate::config::{Config, FileStatus, Source};
+use crate::locate::find_real_solver;
 use crate::lock;
 use crate::profile::Z3;
 use crate::solver::hash_executable;
 use crate::store::{FILE_NAME, SolverStamp, SqliteStore, Store, day, now_s, u64_to_sql};
 
-pub const SUBCOMMANDS: &[&str] = &["analyze", "clear", "doctor", "gc", "help", "stats"];
+pub const SUBCOMMANDS: &[&str] = &["analyze", "clear", "doctor", "gc", "help", "setup", "stats"];
 
 pub fn is_subcommand(arg: &OsString) -> bool {
     SUBCOMMANDS
@@ -26,8 +27,19 @@ pub fn is_subcommand(arg: &OsString) -> bool {
         .any(|s| arg.as_encoded_bytes() == s.as_bytes())
 }
 
+/// What `z3cache` prints when typed at a prompt with no arguments.
+pub const GREETING: &str = "\
+z3cache makes Verus reuse solver answers across runs and worktrees. Verus
+runs it in place of z3; it is not meant to be run on its own.
+
+  z3cache setup     point Verus at z3cache (asks before changing anything)
+  z3cache help      all commands
+";
+
 const USAGE: &str = "\
 usage:
+  z3cache setup [--shell zsh|bash|fish] [--yes|--print] [--undo]
+                                    point Verus at z3cache in your shell's startup file
   z3cache stats [--all|--json]      what the cache has answered, and its size
   z3cache clear                     delete every cached entry
   z3cache gc                        evict to max_size and remove stale lock files
@@ -53,6 +65,7 @@ pub fn run(args: &[OsString]) -> i32 {
             [j] if j == "--json" => stats(StatsView::Json),
             _ => usage_error(),
         },
+        "setup" => crate::setup::run(&rest),
         "clear" if rest.is_empty() => clear(),
         "doctor" if rest.is_empty() => doctor(),
         "help" => {
@@ -524,12 +537,21 @@ fn doctor() -> i32 {
         );
     }
     let real = match find_real_solver(&cfg, &Z3) {
-        Ok(p) => {
-            let how = cfg
-                .origin("real_z3")
-                .unwrap_or_else(|| "first z3 on PATH that is not z3cache".into());
-            println!("real solver   {} (from {how})", p.display());
-            Some(p)
+        Ok(r) => {
+            println!("real solver   {} ({})", r.path.display(), r.how(&cfg));
+            Some(r.path)
+        }
+        // Run from a shell, doctor cannot look next to Verus's driver as a
+        // session started by Verus does (DESIGN section 4); that alone is
+        // not a fault.
+        Err(_) if cfg.real_z3.is_none() => {
+            println!(
+                "real solver   none found from here (not next to verus on PATH, nor on PATH); \
+                 sessions started by Verus use the z3 next to it. To check one here, put \
+                 verus on PATH or {}",
+                cfg.how_to_set("real_z3")
+            );
+            None
         }
         Err(e) => {
             println!("real solver   NOT FOUND: {e}");
@@ -619,7 +641,7 @@ fn source_text(cfg: &Config, key: &str) -> String {
     }
 }
 
-fn check_writable(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn check_writable(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let probe = dir.join(format!(".doctor-{}", std::process::id()));
     std::fs::write(&probe, b"ok")?;
@@ -628,7 +650,7 @@ fn check_writable(dir: &Path) -> std::io::Result<()> {
 
 /// Runs one small query through this program twice against a temporary
 /// cache: the first must reach the solver, the second must not.
-fn round_trip(real: &Path) -> Result<String, String> {
+pub(crate) fn round_trip(real: &Path) -> Result<String, String> {
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = std::env::temp_dir().join(format!("z3cache-doctor-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

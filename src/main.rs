@@ -5,9 +5,10 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, exit};
 
-use z3cache::config::{Config, Mode, find_real_solver};
+use z3cache::config::{Config, Mode};
+use z3cache::locate::find_real_solver;
 use z3cache::profile::{SolverProfile, Z3};
-use z3cache::{cli, log, record, session, solver};
+use z3cache::{cli, log, record, session, setup, solver};
 
 fn main() {
     let argv: Vec<OsString> = std::env::args_os().collect();
@@ -21,6 +22,12 @@ fn main() {
     if invoked_as == "z3cache" && args.first().is_some_and(cli::is_subcommand) {
         exit(cli::run(args));
     }
+    // Typed at a prompt with no arguments, z3 would wait for input on the
+    // terminal; point at the setup instead.
+    if invoked_as == "z3cache" && args.is_empty() && setup::stdin_is_terminal() {
+        print!("{}", cli::GREETING);
+        exit(0);
+    }
 
     let cfg = Config::load();
     log::init(cfg.log.as_deref());
@@ -29,7 +36,10 @@ fn main() {
     }
     let profile: &dyn SolverProfile = &Z3;
     let real = match find_real_solver(&cfg, profile) {
-        Ok(p) => p,
+        Ok(r) => {
+            log!("real solver {} ({})", r.path.display(), r.how(&cfg));
+            r.path
+        }
         Err(e) => {
             eprintln!("z3cache: {e}");
             log!("{e}");

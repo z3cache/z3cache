@@ -386,6 +386,41 @@ fn passing_crate_is_identical_and_warm_starts_no_solver() {
     assert_eq!(after_warm.get("replay_mismatches"), 0);
 }
 
+/// With nothing but `VERUS_Z3_PATH`, as `z3cache setup` leaves it: no
+/// `real_z3`, and no `z3` or `verus` on `PATH`. z3cache finds the Z3 next to
+/// Verus's driver, the process that starts it (DESIGN section 4).
+#[test]
+fn the_z3_next_to_verus_is_found_without_configuration() {
+    let v = require_verus!();
+    let dir = sample("passing", "no-config");
+    let cache = dir.join("cache");
+    let log = dir.join("z3cache.log");
+    let path: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .filter(|d| !d.join("z3").exists() && !d.join("verus").exists())
+        .collect();
+    let path = std::env::join_paths(path).unwrap();
+    let direct = v.direct(&dir, "passing.rs", &[]);
+    let z3cache = z3cache();
+    let env = [
+        ("VERUS_Z3_PATH", z3cache.as_os_str()),
+        ("Z3CACHE_DIR", cache.as_os_str()),
+        ("Z3CACHE_LOG", log.as_os_str()),
+        ("PATH", path.as_os_str()),
+    ];
+    let cached = v.run(&dir, "passing.rs", &[], &env);
+    assert_same("run with no configuration", &cached, &direct);
+    let s = stats(&cache);
+    assert!(s.get("solver_starts") > 0, "{}", s.0);
+    let logged = std::fs::read_to_string(&log).unwrap();
+    let z3 = std::fs::canonicalize(&v.z3).unwrap();
+    let want = format!("real solver {} (next to ", z3.display());
+    assert!(logged.contains(&want), "{want:?} not in\n{logged}");
+    assert!(
+        logged.contains("the program that started z3cache)"),
+        "{logged}"
+    );
+}
+
 /// (b) Intentional failures next to passing functions: identical errors,
 /// spans and exit status. Failures are re-solved under the default policy;
 /// under `Z3CACHE_STORE=all` they are cached too.

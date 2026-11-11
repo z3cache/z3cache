@@ -528,9 +528,137 @@ fn the_real_solver_is_found_on_path_but_not_ourselves() {
         &ours.join("z3"),
         &["--version"],
         b"",
-        &[("PATH", path.as_os_str())],
+        &[
+            ("PATH", path.as_os_str()),
+            ("Z3CACHE_REAL_Z3", OsStr::new("")),
+        ],
     );
     assert_eq!(out.text(), "Z3 version 4.99.0 - 64 bit (stub)\n");
+}
+
+/// A Verus release directory in `dir`: `release/z3` is the stub solver, and
+/// `release/rust_verify` is a copy of the stub, which as `rust_verify` runs
+/// its arguments as a command (see `examples/stub_solver.rs`). It is a copy
+/// because the kernel reports a process's executable with symlinks resolved
+/// (`/proc/<pid>/exe`, `proc_pidpath`): a symlink would place the parent in
+/// the stub's own directory. A script would not do either: its process is
+/// the interpreter's.
+fn verus_release(dir: &Path) -> PathBuf {
+    let release = dir.join("release");
+    std::fs::create_dir_all(&release).unwrap();
+    std::fs::copy(stub(), release.join("rust_verify")).unwrap();
+    std::os::unix::fs::symlink(stub(), release.join("z3")).unwrap();
+    std::fs::canonicalize(release).unwrap()
+}
+
+#[test]
+fn the_real_solver_is_found_next_to_the_parent_process() {
+    let dir = temp_dir("parent");
+    let release = verus_release(&dir);
+    let driver = release.join("rust_verify");
+    let empty = dir.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let log = dir.join("z3cache.log");
+    let stub_log = dir.join("stub.log");
+    // No setting and nothing on PATH: only the parent can lead to a solver.
+    let env = [
+        ("Z3CACHE_REAL_Z3", OsStr::new("")),
+        ("PATH", empty.as_os_str()),
+        ("Z3CACHE_LOG", log.as_os_str()),
+        ("Z3STUB_LOG", stub_log.as_os_str()),
+    ];
+    let z3cache = z3cache();
+    let z = z3cache.to_str().unwrap();
+
+    let out = run(
+        &driver,
+        &[z, "-smt2", "-in"],
+        b"(assert a)\n(check-sat)\n",
+        &env,
+    );
+    assert_eq!((out.text().as_str(), out.code), ("unsat\n", 0));
+    assert_eq!(launches(&stub_log), 1);
+    let want = format!(
+        "real solver {} (next to {}, the program that started z3cache)",
+        release.join("z3").display(),
+        driver.display()
+    );
+    assert!(file_contains(&log, &want), "{want:?} not in the log");
+
+    // Other arguments go to the same solver.
+    let out = run(&driver, &[z, "--version"], b"", &env);
+    assert_eq!(out.text(), "Z3 version 4.99.0 - 64 bit (stub)\n");
+
+    // Started by anything else, z3cache finds no solver, and says how to
+    // set one up.
+    let out = proxy_command(&z3cache, PROXY_ARGS, &env)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(127));
+    assert!(out.stdout.is_empty());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no real z3 found"), "{err}");
+    assert!(err.contains("run `z3cache setup`"), "{err}");
+
+    // doctor, run from a shell, cannot look next to Verus: not a fault. An
+    // explicit setting that does not work is.
+    let doctor = run(&z3cache, &["doctor"], b"", &env);
+    assert_eq!(doctor.code, 0, "{}", doctor.text());
+    assert!(
+        doctor.text().contains("real solver   none found from here"),
+        "{}",
+        doctor.text()
+    );
+    let mut bad = env.to_vec();
+    bad[0].1 = OsStr::new("/nonexistent/z3");
+    let doctor = run(&z3cache, &["doctor"], b"", &bad);
+    assert_eq!(doctor.code, 1, "{}", doctor.text());
+    assert!(
+        doctor
+            .text()
+            .contains("real solver   NOT FOUND: Z3CACHE_REAL_Z3=/nonexistent/z3"),
+        "{}",
+        doctor.text()
+    );
+}
+
+#[test]
+fn the_real_solver_is_found_next_to_verus_on_path() {
+    let dir = temp_dir("verus-on-path");
+    let release = verus_release(&dir);
+    let verus = release.join("verus");
+    std::fs::write(&verus, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&verus, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // Verus installed as a symlink in a bin directory, without its z3.
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&verus, bin.join("verus")).unwrap();
+    let log = dir.join("z3cache.log");
+    let env = [
+        ("Z3CACHE_REAL_Z3", OsStr::new("")),
+        ("PATH", bin.as_os_str()),
+        ("Z3CACHE_LOG", log.as_os_str()),
+    ];
+    let out = run(&z3cache(), &["--version"], b"", &env);
+    assert_eq!(out.text(), "Z3 version 4.99.0 - 64 bit (stub)\n");
+    let how = format!("next to {}, the verus on PATH", verus.display());
+    assert!(file_contains(&log, &how), "{how:?} not in the log");
+
+    let doctor = run(&z3cache(), &["doctor"], b"", &env);
+    let text = doctor.text();
+    assert_eq!(doctor.code, 0, "{text}");
+    assert!(
+        text.contains(&format!(
+            "real solver   {} ({how})",
+            release.join("z3").display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains("setting       real_z3 = none (found automatically) (default)"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -554,6 +682,11 @@ fn cli_stats_clear_doctor() {
     assert_eq!(f.launches(), 2);
     let doctor = f.cli(&["doctor"]);
     assert_eq!(doctor.code, 0, "{}", doctor.text());
+    assert!(
+        doctor.text().contains("(from Z3CACHE_REAL_Z3)"),
+        "{}",
+        doctor.text()
+    );
     assert!(
         doctor.text().contains("no solver started"),
         "{}",

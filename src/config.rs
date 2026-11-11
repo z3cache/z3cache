@@ -9,13 +9,11 @@ use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use toml::de::{DeInteger, DeTable, DeValue};
-
-use crate::profile::SolverProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -472,7 +470,7 @@ impl Config {
             warnings,
         };
 
-        let real_z3 = r.path("real_z3", None, "none (first other z3 on PATH)");
+        let real_z3 = r.path("real_z3", None, "none (found automatically)");
         let dir = r.path("dir", default_dir(env), "none");
         let mode = r.text(
             "mode",
@@ -698,56 +696,6 @@ fn default_dir(env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| home.map(|h| h.join(".cache")))
         .map(|d| d.join("z3cache"))
-}
-
-/// Finds the real solver: the `real_z3` setting, or else the first
-/// executable with the profile's binary name on `PATH` that is not this
-/// program.
-pub fn find_real_solver(cfg: &Config, profile: &dyn SolverProfile) -> Result<PathBuf, String> {
-    let me = env::current_exe()
-        .and_then(std::fs::metadata)
-        .map(|m| (m.dev(), m.ino()))
-        .ok();
-    let is_me = |p: &Path| {
-        std::fs::metadata(p)
-            .map(|m| Some((m.dev(), m.ino())) == me)
-            .unwrap_or(false)
-    };
-    if let Some(p) = &cfg.real_z3 {
-        let given = match cfg.source("real_z3") {
-            Source::Env => format!("Z3CACHE_REAL_Z3={}", p.display()),
-            _ => format!(
-                "real_z3 = {} ({})",
-                p.display(),
-                cfg.origin("real_z3").unwrap_or_default()
-            ),
-        };
-        if !is_executable(p) {
-            return Err(format!("{given} is not an executable file"));
-        }
-        if is_me(p) {
-            return Err(format!("{given} points at z3cache itself"));
-        }
-        return Ok(p.clone());
-    }
-    let path = env::var_os("PATH").unwrap_or_default();
-    for dir in env::split_paths(&path) {
-        let candidate = dir.join(profile.binary_name());
-        if is_executable(&candidate) && !is_me(&candidate) {
-            return Ok(candidate);
-        }
-    }
-    Err(format!(
-        "no real {} found on PATH; {}",
-        profile.binary_name(),
-        cfg.how_to_set("real_z3")
-    ))
-}
-
-fn is_executable(p: &Path) -> bool {
-    std::fs::metadata(p)
-        .map(|m| m.is_file() && m.mode() & 0o111 != 0)
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

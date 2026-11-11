@@ -66,9 +66,12 @@ pub fn no_config() -> PathBuf {
 }
 
 /// A command running `bin` with `args`, stdin and stdout piped, all
-/// `Z3CACHE_*` and `Z3STUB_*` variables cleared and `env` set. Unless `env`
-/// sets `Z3CACHE_DIR`, it gets a fresh, empty cache; unless it sets
-/// `Z3CACHE_CONFIG`, no config file.
+/// `Z3CACHE_*` and `Z3STUB_*` variables and `VERUS_Z3_PATH` cleared and
+/// `env` set. Unless `env` sets `Z3CACHE_DIR`, it gets a fresh, empty cache;
+/// unless it sets `Z3CACHE_CONFIG`, no config file; unless it sets
+/// `Z3CACHE_REAL_Z3`, the stub solver as the real one, so that no test
+/// finds the developer's own Z3 or Verus by itself. Tests of that lookup
+/// set `Z3CACHE_REAL_Z3` to the empty string, which counts as unset.
 pub fn proxy_command(bin: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Command {
     let mut cmd = Command::new(bin);
     cmd.args(args)
@@ -89,6 +92,13 @@ pub fn proxy_command(bin: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Comma
     if !env.iter().any(|(k, _)| *k == "Z3CACHE_CONFIG") {
         cmd.env("Z3CACHE_CONFIG", no_config());
     }
+    if !env.iter().any(|(k, _)| *k == "Z3CACHE_REAL_Z3") {
+        cmd.env(
+            "Z3CACHE_REAL_Z3",
+            z3cache().parent().unwrap().join("examples/stub_solver"),
+        );
+    }
+    cmd.env_remove("VERUS_Z3_PATH");
     for (k, v) in env {
         cmd.env(k, v);
     }

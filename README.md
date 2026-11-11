@@ -53,53 +53,51 @@ shared by every worktree and every Verus process on the machine.
 
 ## Quick start
 
-You need macOS or Linux, a recent stable Rust toolchain, and Verus. Verus
-releases include their own `z3` next to the `verus` binary; z3cache uses that
-one as the real solver.
-
-Install z3cache:
+You need macOS or Linux, a recent stable Rust toolchain, and Verus.
 
 ```sh
 cargo install z3cache
+z3cache setup
 ```
 
-Tell z3cache where the real Z3 is, in `~/.config/z3cache/config.toml`:
+`z3cache setup` finds your Verus and your shell, shows the one line it
+would add to your shell's startup file (`~/.zshenv`, `~/.bashrc` or
+`~/.config/fish/config.fish`), and asks before changing anything. It then
+runs a test query through the cache. `z3cache setup --undo` removes the line
+again.
 
-```toml
-real_z3 = "/path/to/verus/z3"
-```
-
-Then point Verus at z3cache and check the setup:
+The line points Verus at z3cache. If you prefer to add it yourself, this is
+it for zsh (`z3cache setup --print` shows the right one for your shell):
 
 ```sh
-export VERUS_Z3_PATH="$HOME/.cargo/bin/z3cache"
-
-# Check the setup: finds Z3, checks the cache, runs one query cold and warm
-z3cache doctor
-
-# Use Verus as usual
-verus src/lib.rs
-
-# See what the cache did
-z3cache stats
+echo 'export VERUS_Z3_PATH="$HOME/.cargo/bin/z3cache"' >> ~/.zshenv
 ```
 
-To use the cache in every worktree, put the `export` line in your shell
-profile. To turn it off for one run, set `Z3CACHE_MODE=off`.
+Then open a new terminal and use Verus as usual:
+
+```sh
+z3cache doctor           # check the setup: finds Z3, checks the cache, runs one query cold and warm
+verus src/lib.rs         # or cargo verus, or your own scripts
+z3cache stats            # see what the cache did
+```
+
+There is nothing else to configure. Verus releases ship their own `z3` next
+to the `verus` binary, and z3cache uses that one: when Verus runs z3cache,
+z3cache looks for `z3` next to the Verus program that started it. To turn the
+cache off for one run, set `Z3CACHE_MODE=off`.
 
 ### Or: a one-line alias
 
-With `real_z3` in the config file, or the Verus release directory on your
-`PATH` (z3cache then finds the `z3` next to `verus` by itself), one alias in
-`~/.zshrc` or `~/.bashrc` can replace the `export` line:
+To use z3cache only for the `verus` you type, one alias in `~/.zshrc` or
+`~/.bashrc` can replace the startup file line:
 
 ```sh
 alias verus='VERUS_Z3_PATH="$HOME/.cargo/bin/z3cache" verus'
 ```
 
 Aliases only apply to commands you type in an interactive shell. If your
-project runs Verus from a script, a Makefile or `cargo verus`, use the
-`export` line above instead. To bypass the alias for one run, type
+project runs Verus from a script, a Makefile or `cargo verus`, use
+`z3cache setup` instead. To bypass the alias for one run, type
 `command verus`.
 
 ## Is it safe?
@@ -129,7 +127,6 @@ Settings live in `~/.config/z3cache/config.toml` (on macOS too), a
 
 ```toml
 # ~/.config/z3cache/config.toml
-real_z3 = "~/verus/z3"
 dir = "~/caches/z3cache"
 max_size = "2G"
 verify = 0.05
@@ -149,7 +146,7 @@ command line belongs to Z3.
 
 | Key | Variable | What it does | Default |
 |---|---|---|---|
-| `real_z3` | `Z3CACHE_REAL_Z3` | Path to the real Z3 | the first other `z3` on `PATH` |
+| `real_z3` | `Z3CACHE_REAL_Z3` | Path to the real Z3, only if z3cache cannot find Verus's `z3` by itself | found automatically |
 | `dir` | `Z3CACHE_DIR` | Cache directory | `~/Library/Caches/z3cache` (macOS), `~/.cache/z3cache` (Linux) |
 | `mode` | `Z3CACHE_MODE` | `rw` read and write; `ro` read only; `enforce` fail on any miss; `off` plain Z3 | `rw` |
 | `store` | `Z3CACHE_STORE` | `unsat` stores only successful proofs; `all` also stores failures | `unsat` |
@@ -173,6 +170,7 @@ came from. Every setting is described in
 
 | Command | What it does |
 |---|---|
+| `z3cache setup [--undo]` | Point Verus at z3cache in your shell's startup file; `--undo` removes it. `--shell zsh\|bash\|fish` picks the shell, `--yes` skips the question, `--print` only prints |
 | `z3cache stats [--all\|--json]` | Hit rate, hits, misses, solver time saved, cache size, and anything that needs attention |
 | `z3cache doctor` | Check the setup end to end |
 | `z3cache gc` | Shrink the cache to `max_size` (also runs automatically) |
@@ -189,8 +187,10 @@ to the real Z3.
   were bypassed, they are listed under "needs attention" with the command or
   option that z3cache does not cache; those sessions run plain Z3. Set `log`
   in the config file for details.
-- **"no real z3 found on PATH":** set `real_z3` in the config file to the `z3`
-  that ships with your Verus.
+- **"no real z3 found":** z3cache looks for `z3` next to the program that
+  started it (Verus), then next to the `verus` on your `PATH`, then on your
+  `PATH`. If your Verus keeps its `z3` somewhere else, set `real_z3` in the
+  config file to that `z3`.
 - **Starting over:** run `z3cache clear`, or delete the cache directory. The
   cache only ever saves time, so nothing is lost.
 
