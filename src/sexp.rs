@@ -487,4 +487,217 @@ mod tests {
         assert_eq!(string_contents(b"\"\""), Some(Vec::new()));
         assert_eq!(string_contents(b"abc"), None);
     }
+
+    // Property tests: commands generated from fixed seeds, each written out
+    // with random whitespace and comments.
+
+    use crate::TestRng;
+
+    /// A generated s-expression.
+    enum Sx {
+        Atom(String),
+        List(Vec<Sx>),
+    }
+
+    fn gen_atom(rng: &mut TestRng) -> String {
+        match rng.below(6) {
+            0 => rng.pick(&["assert", "check-sat", "push", "x", "f%1", "a.b!c", "+", "=>", "<=", "_"]).to_string(),
+            1 => format!(":{}", rng.pick(&["rlimit", "pattern", "qid", "all-statistics"])),
+            2 => rng.below(100_000).to_string(),
+            3 => {
+                // A string literal: `""` is the only escape; anything else,
+                // parentheses, `;`, `|` and newlines included, is literal.
+                let mut t = String::from("\"");
+                for _ in 0..rng.below(6) {
+                    t.push_str(rng.pick(&["a", " ", "\"\"", "(", ")", ";", "|", "\n", "\\", "x y"]));
+                }
+                t.push('"');
+                t
+            }
+            4 => {
+                // A quoted symbol: anything but `|`.
+                let mut t = String::from("|");
+                for _ in 0..rng.below(6) {
+                    t.push_str(rng.pick(&["a", " ", "(", ")", ";", "\"", "\n", "x y"]));
+                }
+                t.push('|');
+                t
+            }
+            _ => format!("v{}", rng.below(20)),
+        }
+    }
+
+    fn gen_sx(rng: &mut TestRng, depth: usize) -> Sx {
+        if depth == 0 || rng.chance(45) {
+            return Sx::Atom(gen_atom(rng));
+        }
+        Sx::List((0..rng.below(4)).map(|_| gen_sx(rng, depth - 1)).collect())
+    }
+
+    /// A command: a non-empty list.
+    fn gen_command(rng: &mut TestRng) -> Sx {
+        let mut items = vec![Sx::Atom(gen_atom(rng))];
+        items.extend((0..rng.below(4)).map(|_| gen_sx(rng, 3)));
+        Sx::List(items)
+    }
+
+    /// Whitespace and comments: never empty, so it always separates.
+    fn gap(rng: &mut TestRng) -> String {
+        match rng.below(8) {
+            0 => "\n".into(),
+            1 => "  \t".into(),
+            2 => format!(" ;{}\n", rng.pick(&["", " c", " ( \" |", " ) ;"])),
+            3 => "\r\n ".into(),
+            _ => " ".into(),
+        }
+    }
+
+    /// Optional whitespace, where the grammar needs none.
+    fn maybe_gap(rng: &mut TestRng) -> String {
+        if rng.chance(30) { gap(rng) } else { String::new() }
+    }
+
+    /// Writes `sx` with random formatting.
+    fn write(rng: &mut TestRng, sx: &Sx, out: &mut String) {
+        match sx {
+            Sx::Atom(a) => out.push_str(a),
+            Sx::List(items) => {
+                out.push('(');
+                out.push_str(&maybe_gap(rng));
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        let both_atoms = matches!((&items[i - 1], item), (Sx::Atom(_), Sx::Atom(_)));
+                        out.push_str(&if both_atoms { gap(rng) } else { maybe_gap(rng) });
+                    }
+                    write(rng, item, out);
+                }
+                out.push_str(&maybe_gap(rng));
+                out.push(')');
+            }
+        }
+    }
+
+    /// The canonical form DESIGN section 5 specifies.
+    fn canonical_of(sx: &Sx) -> String {
+        match sx {
+            Sx::Atom(a) => a.clone(),
+            Sx::List(items) => format!("({})", items.iter().map(canonical_of).collect::<Vec<_>>().join(" ")),
+        }
+    }
+
+    /// A random input: commands with gaps, and a tail that is whitespace,
+    /// a comment or an incomplete command. Returns the input, the expected
+    /// canonical forms and the expected remainder.
+    fn gen_input(rng: &mut TestRng) -> (Vec<u8>, Vec<String>, Vec<u8>) {
+        let mut input = String::new();
+        let mut canon = Vec::new();
+        for _ in 0..1 + rng.below(6) {
+            input.push_str(&maybe_gap(rng));
+            let cmd = gen_command(rng);
+            write(rng, &cmd, &mut input);
+            canon.push(canonical_of(&cmd));
+        }
+        let tail = match rng.below(4) {
+            0 => String::new(),
+            1 => gap(rng),
+            2 => " ; trailing (".into(),
+            _ => {
+                let mut t = maybe_gap(rng);
+                let mut cmd = String::new();
+                let incomplete = gen_command(rng);
+                write(rng, &incomplete, &mut cmd);
+                t.push_str(&cmd[..cmd.len() - 1]);
+                t
+            }
+        };
+        input.push_str(&tail);
+        (input.into_bytes(), canon, tail.into_bytes())
+    }
+
+    /// Splits `input` at the given increasing cut points.
+    fn split_at(input: &[u8], cuts: &[usize]) -> (Vec<Command>, Option<ParseError>, Vec<u8>) {
+        let mut chunks: Vec<&[u8]> = Vec::new();
+        let mut from = 0;
+        for &c in cuts {
+            chunks.push(&input[from..c]);
+            from = c;
+        }
+        chunks.push(&input[from..]);
+        split_all(&chunks)
+    }
+
+    const SEEDS: u64 = 2000;
+
+    #[test]
+    fn property_any_split_gives_the_same_commands() {
+        for seed in 0..SEEDS {
+            let mut rng = TestRng::new(seed);
+            let (input, canon, tail) = gen_input(&mut rng);
+            let (whole, err, rest) = split_all(&[&input]);
+            let shown = String::from_utf8_lossy(&input);
+            assert_eq!(err, None, "seed {seed}: {shown:?}");
+            let got: Vec<String> = whole.iter().map(|c| String::from_utf8(c.canonical.clone()).unwrap()).collect();
+            assert_eq!(got, canon, "seed {seed}: {shown:?}");
+            assert_eq!(rest, tail, "seed {seed}: {shown:?}");
+            for _ in 0..8 {
+                let mut cuts: Vec<usize> = (0..rng.below(5)).map(|_| rng.below(input.len() + 1)).collect();
+                cuts.sort_unstable();
+                let (parts, err, rest) = split_at(&input, &cuts);
+                assert_eq!(err, None, "seed {seed}, cuts {cuts:?}: {shown:?}");
+                assert_eq!(parts, whole, "seed {seed}, cuts {cuts:?}: {shown:?}");
+                assert_eq!(rest, tail, "seed {seed}, cuts {cuts:?}: {shown:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn property_raw_bytes_and_remainder_reproduce_the_input() {
+        for seed in 0..SEEDS {
+            let mut rng = TestRng::new(seed);
+            let (input, _, _) = gen_input(&mut rng);
+            let mut cuts: Vec<usize> = (0..rng.below(4)).map(|_| rng.below(input.len() + 1)).collect();
+            cuts.sort_unstable();
+            let (cmds, err, rest) = split_at(&input, &cuts);
+            assert_eq!(err, None, "seed {seed}");
+            let mut joined: Vec<u8> = cmds.iter().flat_map(|c| c.raw.clone()).collect();
+            joined.extend(rest);
+            assert_eq!(joined, input, "seed {seed}, cuts {cuts:?}");
+        }
+    }
+
+    #[test]
+    fn property_canonical_form_is_a_fixed_point() {
+        for seed in 0..SEEDS {
+            let mut rng = TestRng::new(seed);
+            let (input, _, _) = gen_input(&mut rng);
+            let (cmds, err, _) = split_all(&[&input]);
+            assert_eq!(err, None, "seed {seed}");
+            for c in cmds {
+                let (again, err, rest) = split_all(&[&c.canonical]);
+                let shown = String::from_utf8_lossy(&c.canonical);
+                assert_eq!(err, None, "seed {seed}: {shown}");
+                assert!(rest.is_empty(), "seed {seed}: {shown}");
+                assert_eq!(again.len(), 1, "seed {seed}: {shown}");
+                assert_eq!(again[0].canonical, c.canonical, "seed {seed}");
+                assert_eq!(again[0].raw, c.canonical, "seed {seed}");
+                assert_eq!(again[0].items, c.items, "seed {seed}: {shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn property_formatting_does_not_change_the_canonical_form() {
+        for seed in 0..SEEDS {
+            let mut rng = TestRng::new(seed);
+            let cmd = gen_command(&mut rng);
+            let (mut a, mut b) = (String::new(), String::new());
+            write(&mut rng, &cmd, &mut a);
+            write(&mut rng, &cmd, &mut b);
+            let (ca, err_a, _) = split_all(&[a.as_bytes()]);
+            let (cb, err_b, _) = split_all(&[b.as_bytes()]);
+            assert_eq!((err_a, err_b), (None, None), "seed {seed}: {a:?} {b:?}");
+            assert_eq!(ca[0].canonical, cb[0].canonical, "seed {seed}: {a:?} {b:?}");
+            assert_eq!(ca[0].items, cb[0].items, "seed {seed}: {a:?} {b:?}");
+        }
+    }
 }

@@ -198,3 +198,91 @@ pub fn many_queries(offset: usize, n: usize) -> Vec<u8> {
     }
     s.into_bytes()
 }
+
+/// The real Z3: `Z3CACHE_REAL_Z3`, or else the first `z3` on `PATH`.
+pub fn real_z3() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("Z3CACHE_REAL_Z3").filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join("z3"))
+        .find(|p| p.is_file())
+}
+
+/// Makes outputs comparable across the proxy's replay:
+/// - error positions refer to the input as the solver received it, which the
+///   proxy re-sends in canonical form;
+/// - statistics vary from run to run;
+/// - Z3 4.16.0 explains an exceeded resource limit as `canceled` if the
+///   solver has been through a push/pop and as `max. resource limit
+///   exceeded` otherwise, and the replay leaves out popped frames
+///   (DESIGN section 13, solver history). The verdict is the same.
+pub fn normalize(out: &str) -> String {
+    let mut o = String::new();
+    for line in out.split_inclusive('\n') {
+        if line == "(:reason-unknown \"canceled\")\n"
+            || line == "(:reason-unknown \"max. resource limit exceeded\")\n"
+        {
+            o.push_str("(:reason-unknown <resource limit>)\n");
+            continue;
+        }
+        let is_stats = line.starts_with(" :")
+            || (line.starts_with("(:")
+                && !line.starts_with("(:version")
+                && !line.starts_with("(:reason-unknown"));
+        if is_stats {
+            continue;
+        }
+        match line.strip_prefix("(error \"line ") {
+            Some(rest) => match rest.find(": ") {
+                Some(at) => {
+                    o.push_str("(error \"");
+                    o.push_str(&rest[at + 2..]);
+                }
+                None => o.push_str(line),
+            },
+            None => o.push_str(line),
+        }
+    }
+    o
+}
+
+
+/// Like [`run`], but returns `None` instead of hanging if `bin` has not
+/// exited within `limit` (it is then killed). Waits on the exit itself, not
+/// by polling, so it adds no latency to fast runs.
+pub fn run_within(
+    bin: &Path,
+    args: &[&str],
+    input: &[u8],
+    env: &[(&str, &OsStr)],
+    limit: std::time::Duration,
+) -> Option<Run> {
+    let mut child = proxy_command(bin, args, env).spawn().unwrap();
+    let pid = child.id() as i32;
+    let mut stdin = child.stdin.take().unwrap();
+    let input = input.to_vec();
+    std::thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
+    let mut stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.read_to_end(&mut out);
+        let status = child.wait().unwrap();
+        let _ = tx.send(Run {
+            stdout: out,
+            code: status.code().unwrap_or(-1),
+        });
+    });
+    match rx.recv_timeout(limit) {
+        Ok(run) => Some(run),
+        Err(_) => {
+            // SAFETY: kill(2) on our own child.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            None
+        }
+    }
+}

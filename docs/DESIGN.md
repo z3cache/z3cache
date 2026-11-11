@@ -535,18 +535,52 @@ entries apart in one store.
 
 1. **Unit:** the command splitter (strings, quoted symbols, comments, commands
    split across reads), state hashing, classification, statistics, the store.
+   Property tests run fixed seeds: generated commands, written with random
+   whitespace and comments, split the same at any chunk boundaries; raw bytes
+   and the remainder reproduce the input; the canonical form is a fixed point
+   and does not depend on formatting; a balanced push…pop leaves the key
+   unchanged; changing any command still on the path changes the key, and
+   changing one in a popped frame does not.
 2. **Stub solver** (`examples/stub_solver.rs`): a scripted stand-in for Z3
    that answers from a script and logs its launches. Covers lazy start,
    replay order, `pop` handling, bypass, policies, modes, and "a warm run
    starts no solver".
 3. **Differential:** a corpus of transcripts run through real Z3, the proxy
    cold and the proxy warm, under each store policy and solver lifetime.
-   Output must match apart from statistics and error positions.
+   Output must match apart from statistics and error positions. The corpus
+   includes sessions recorded from the end-to-end sample crates
+   (`verus_*.smt2`), so real Verus traffic is covered without Verus.
+   **Randomized** (`tests/random.rs`): a few hundred sessions generated from
+   fixed seeds (declarations, an uninterpreted function, nested push/pop,
+   linear arithmetic and boolean assertions, quantifiers, `check-sat`,
+   `check-sat-assuming`, `get-value`, `get-unsat-core`, `echo`, allowlisted
+   options), in families that share a prefix, with one cache per
+   configuration shared by all sessions. The generator avoids what solver
+   history may legitimately change (section 13): checks are made inside a
+   frame, as Verus makes them; no check runs near its resource limit;
+   `get-value` is asked only where the model is unique; `:reason-unknown`
+   is compared only after `unknown`.
 4. **Concurrency:** many processes on one store; one solve per key; sessions
    killed during writes leave a valid store; `gc` running alongside sessions.
    Tests synchronise on events rather than timing.
-5. **End to end:** Verus on a sample crate with and without the proxy, cold
-   and warm, with identical results.
+5. **End to end** (`tests/e2e.rs`, sample crates in `tests/verus/`): Verus
+   directly and through the proxy, cold and warm, with identical results,
+   diagnostics and exit status, and the counters to match:
+   - passing proofs of many kinds: the warm run starts no solver;
+   - intentional failures: re-solved under `unsat`, cached under `all`;
+   - an exceeded `#[verifier::rlimit]`;
+   - an edit: only the edited module misses, and a breaking edit fails;
+   - two worktrees at once on one cache, held at a gate until one waits for
+     the other's lock: each unsat query is solved once;
+   - `--time` reports the same resource totals cold and warm;
+   - profiling sessions bypass, with the reason in `stats`;
+   - `off`, `enforce` and `ro` modes; several threads; `analyze` on two
+     recorded runs.
+
+   Each sample module is written so that Verus emits the same commands on
+   every run: Verus 0.2026.10.26 orders the accessors of named enum fields
+   that differ between variants differently from run to run, which changes
+   the module's keys.
 
 Tiers 3 and 5 need a real Z3 or Verus and skip with a message when none is
 configured.

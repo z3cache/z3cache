@@ -497,4 +497,167 @@ mod tests {
         other.argv.push(b"smt.random_seed=1".to_vec());
         assert_ne!(a.key, st.hashes(&other, b"(check-sat)").key);
     }
+
+    // Property tests: random push/pop/append sequences from fixed seeds.
+
+    use crate::TestRng;
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        Push(u64),
+        Pop(u64),
+        Append(String),
+        Query(String, &'static str),
+        SetOption(&'static str, String),
+    }
+
+    fn apply(st: &mut State, op: &Op) {
+        match op {
+            Op::Push(n) => st.push(*n),
+            Op::Pop(n) => st.pop(*n).unwrap(),
+            Op::Append(c) => st.append(c.as_bytes()),
+            Op::Query(c, r) => st.append_query(c.as_bytes(), r.as_bytes(), Verdict::of(r.as_bytes())),
+            Op::SetOption(name, value) => {
+                let canonical = format!("(set-option :{name} {value})");
+                st.set_option(name.as_bytes(), value.as_bytes(), canonical.as_bytes());
+            }
+        }
+    }
+
+    fn state_of(ops: &[Op]) -> State {
+        let mut st = State::new();
+        for op in ops {
+            apply(&mut st, op);
+        }
+        st
+    }
+
+    fn gen_command(rng: &mut TestRng) -> String {
+        format!("(assert (> {} {}))", rng.pick(&["x", "y", "|a b|", "(f x)"]), rng.below(50))
+    }
+
+    /// A random op sequence that stays within the frames it opens; options
+    /// set inside a frame are restored before its pop, so that the
+    /// sequence leaves no trace when wrapped in push...pop.
+    fn gen_ops(rng: &mut TestRng, len: usize, depth: &mut u64, base: u64) -> Vec<Op> {
+        let mut ops = Vec::new();
+        let mut restore: Vec<Vec<Op>> = Vec::new();
+        for _ in 0..len {
+            match rng.below(10) {
+                0 | 1 => {
+                    let n = 1 + rng.below(2) as u64;
+                    *depth += n;
+                    ops.push(Op::Push(n));
+                    restore.extend((0..n).map(|_| Vec::new()));
+                }
+                2 if *depth > base => {
+                    let n = 1 + rng.below((*depth - base).min(2) as usize) as u64;
+                    for _ in 0..n {
+                        ops.extend(restore.pop().unwrap());
+                    }
+                    *depth -= n;
+                    ops.push(Op::Pop(n));
+                }
+                3 => ops.push(Op::Query("(check-sat)".into(), rng.pick(&["sat\n", "unsat\n", "unknown\n"]))),
+                4 if !restore.is_empty() => {
+                    // Option values in the key come from the map; an
+                    // option changed and then restored leaves it as it was.
+                    let value = rng.below(5).to_string();
+                    ops.push(Op::SetOption("smt.case_split", value));
+                    restore.last_mut().unwrap().push(Op::SetOption("smt.case_split", "0".into()));
+                }
+                _ => ops.push(Op::Append(gen_command(rng))),
+            }
+        }
+        while let Some(r) = restore.pop() {
+            ops.extend(r);
+            *depth -= 1;
+            ops.push(Op::Pop(1));
+        }
+        ops
+    }
+
+    const SEEDS: u64 = 500;
+
+    #[test]
+    fn property_a_balanced_push_pop_leaves_the_key_unchanged() {
+        for seed in 0..SEEDS {
+            let mut rng = TestRng::new(seed);
+            // A prefix that may leave frames open and options set.
+            let mut prefix = vec![Op::SetOption("smt.case_split", "0".into())];
+            let mut depth = 0;
+            for _ in 0..rng.below(12) {
+                match rng.below(5) {
+                    0 => {
+                        depth += 1;
+                        prefix.push(Op::Push(1));
+                    }
+                    1 => prefix.push(Op::Query("(check-sat)".into(), "unsat\n")),
+                    _ => prefix.push(Op::Append(gen_command(&mut rng))),
+                }
+            }
+            let mut st = state_of(&prefix);
+            let before = st.hashes(&ctx(), b"(check-sat)");
+            let frames = st.frame_count();
+            let n = 1 + rng.below(3) as u64;
+            st.push(n);
+            let mut inner_depth = depth + n;
+            let len = rng.below(30);
+            let inner = gen_ops(&mut rng, len, &mut inner_depth, depth + n);
+            for op in &inner {
+                apply(&mut st, op);
+            }
+            assert_eq!(inner_depth, depth + n, "seed {seed}");
+            st.pop(n).unwrap();
+            assert_eq!(st.frame_count(), frames, "seed {seed}");
+            assert_eq!(st.hashes(&ctx(), b"(check-sat)"), before, "seed {seed}: {prefix:?} push {n} {inner:?} pop {n}");
+        }
+    }
+
+    #[test]
+    fn property_changing_a_command_on_the_path_changes_the_key() {
+        for seed in 0..SEEDS {
+            let mut rng = TestRng::new(seed);
+            let mut depth = 0;
+            let len = 1 + rng.below(30);
+            let mut ops = gen_ops(&mut rng, len, &mut depth, 0);
+            // Leave some frames open at the end, so that the path has
+            // commands above the base frame.
+            ops.truncate(rng.below(ops.len() + 1));
+            let key = state_of(&ops).hashes(&ctx(), b"(check-sat)").key;
+            // Which commands are still on the path: those whose frame has
+            // not been popped since.
+            let mut frames: Vec<Vec<usize>> = vec![Vec::new()];
+            for (i, op) in ops.iter().enumerate() {
+                match op {
+                    Op::Push(n) => frames.extend((0..*n).map(|_| Vec::new())),
+                    Op::Pop(n) => frames.truncate(frames.len() - *n as usize),
+                    Op::Append(_) | Op::Query(..) => frames.last_mut().unwrap().push(i),
+                    Op::SetOption(..) => {}
+                }
+            }
+            let on_path: Vec<usize> = frames.concat();
+            for (i, op) in ops.iter().enumerate() {
+                let changed = match op {
+                    Op::Append(c) => Op::Append(c.replacen('>', "<", 1)),
+                    Op::Query(c, r) => {
+                        // The same query with another answer.
+                        let other = if *r == "sat\n" { "unsat\n" } else { "sat\n" };
+                        Op::Query(c.clone(), other)
+                    }
+                    _ => continue,
+                };
+                let mut mutated = ops.clone();
+                mutated[i] = changed;
+                let other = state_of(&mutated).hashes(&ctx(), b"(check-sat)").key;
+                if on_path.contains(&i) {
+                    assert_ne!(other, key, "seed {seed}: changing op {i} ({op:?}) on the path kept the key");
+                } else {
+                    assert_eq!(other, key, "seed {seed}: changing popped op {i} ({op:?}) changed the key");
+                }
+            }
+            // And the command being asked is part of the key.
+            assert_ne!(state_of(&ops).hashes(&ctx(), b"(check-sat-assuming (a))").key, key, "seed {seed}");
+        }
+    }
 }

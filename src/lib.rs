@@ -35,3 +35,36 @@ pub(crate) fn test_dir(kind: &str, name: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&d);
     d
 }
+
+/// A small deterministic generator for property tests (SplitMix64). Tests
+/// that use it run fixed seeds and name the failing one.
+#[cfg(test)]
+pub(crate) struct TestRng(u64);
+
+#[cfg(test)]
+impl TestRng {
+    pub(crate) fn new(seed: u64) -> TestRng {
+        TestRng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03)
+    }
+
+    pub(crate) fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A number in `0..n`.
+    pub(crate) fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+
+    pub(crate) fn chance(&mut self, percent: u64) -> bool {
+        self.next() % 100 < percent
+    }
+
+    pub(crate) fn pick<'a, T>(&mut self, xs: &'a [T]) -> &'a T {
+        &xs[self.below(xs.len())]
+    }
+}

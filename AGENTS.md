@@ -78,13 +78,31 @@ relying on a detail, and update section 2 if it differs.
 ```
 cargo build --release                 # target/release/z3cache
 cargo test                            # unit, stub-solver and concurrency tests
-Z3CACHE_REAL_Z3=/path/to/z3 cargo test --test differential   # against real Z3
+Z3CACHE_REAL_Z3=/path/to/z3 cargo test --test differential   # corpus against real Z3
+Z3CACHE_REAL_Z3=/path/to/z3 cargo test --test random         # generated sessions
 Z3CACHE_VERUS=/path/to/verus cargo test --test e2e            # Verus end to end
+
+# Every tier at once (the Z3 next to verus is the real solver for e2e):
+Z3CACHE_REAL_Z3=/path/to/verus-dir/z3 Z3CACHE_VERUS=/path/to/verus-dir/verus cargo test
 ```
 
 `cargo test` builds the stub solver (`examples/stub_solver.rs`); a single
 `cargo test --test proxy` does not, so run `cargo build --examples` first.
 Tests use temporary cache directories and never touch the user's cache.
+Without `Z3CACHE_REAL_Z3` (or a `z3` on `PATH`) and `Z3CACHE_VERUS`, the
+differential, random and e2e tests print `SKIPPED` and pass.
+
+- `random` runs 300 sessions by default; set `Z3CACHE_RANDOM_SESSIONS` for a
+  longer soak. A failure names the seed and prints the session.
+- `e2e` verifies the sample crates in `tests/verus/`. Each Verus run is
+  bounded; one that hangs is killed with its solvers and fails the test.
+- Property tests in `src/sexp.rs` and `src/state.rs` run fixed seeds through
+  `TestRng` (`src/lib.rs`) and name the failing seed.
+- Tests marked `#[ignore]` document known bugs; `cargo test -- --ignored`
+  runs them.
+- To refresh a `tests/corpus/verus_*.smt2` transcript, verify the sample crate
+  with `Z3CACHE_RECORD` set and copy the session's `.in` file. Check that it
+  contains no local paths.
 
 Use a local build with Verus:
 
