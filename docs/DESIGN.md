@@ -467,9 +467,13 @@ Modes:
 
 ## 12. Command-line tools
 
-- `z3cache stats [--json]`: hits, misses, stores, bypassed sessions with
-  reasons, replay mismatches, audit results, solver time saved, entry count
-  and size.
+- `z3cache stats [--all|--json]`: for today, the last 7 days and all time,
+  the hit rate (hits over hits plus misses), hits, misses, solver time saved,
+  sessions, solver starts and entries stored, with the entry count and size.
+  Lock, audit and eviction counts are shown when not zero, and problems
+  (replay mismatches, sessions with solver errors, audit contradictions,
+  bypassed sessions with their reasons) under "needs attention". `--all`
+  shows every row; `--json` gives every counter.
 - `z3cache gc`: evict to the size cap and remove idle lock files, then report
   what was done.
 - `z3cache clear`: delete all entries.

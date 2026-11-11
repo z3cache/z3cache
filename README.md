@@ -173,7 +173,7 @@ came from. Every setting is described in
 
 | Command | What it does |
 |---|---|
-| `z3cache stats [--json]` | Hits, misses, solver time saved, cache size |
+| `z3cache stats [--all\|--json]` | Hit rate, hits, misses, solver time saved, cache size, and anything that needs attention |
 | `z3cache doctor` | Check the setup end to end |
 | `z3cache gc` | Shrink the cache to `max_size` (also runs automatically) |
 | `z3cache clear` | Delete every cached answer |
@@ -185,7 +185,8 @@ to the real Z3.
 
 ## Troubleshooting
 
-- **No speedup:** run `z3cache stats`. Bypassed sessions list the command or
+- **No speedup:** run `z3cache stats` and look at the hit rate. If sessions
+  were bypassed, they are listed under "needs attention" with the command or
   option that z3cache does not cache; those sessions run plain Z3. Set `log`
   in the config file for details.
 - **"no real z3 found on PATH":** set `real_z3` in the config file to the `z3`

@@ -28,7 +28,7 @@ pub fn is_subcommand(arg: &OsString) -> bool {
 
 const USAGE: &str = "\
 usage:
-  z3cache stats [--json]            what the cache has answered, and its size
+  z3cache stats [--all|--json]      what the cache has answered, and its size
   z3cache clear                     delete every cached entry
   z3cache gc                        evict to max_size and remove stale lock files
   z3cache doctor                    check the real solver, the cache directory, and one query
@@ -48,8 +48,9 @@ pub fn run(args: &[OsString]) -> i32 {
     match &*sub {
         "analyze" => analyze_cmd(&args[1..]),
         "stats" => match rest.as_slice() {
-            [] => stats(false),
-            [j] if j == "--json" => stats(true),
+            [] => stats(StatsView::Summary),
+            [a] if a == "--all" => stats(StatsView::All),
+            [j] if j == "--json" => stats(StatsView::Json),
             _ => usage_error(),
         },
         "clear" if rest.is_empty() => clear(),
@@ -188,13 +189,13 @@ fn json_period(m: &BTreeMap<String, i64>) -> String {
     format!("{{{}}}", parts.join(", "))
 }
 
-fn stats(json: bool) -> i32 {
+fn stats(view: StatsView) -> i32 {
     let cfg = Config::load();
     let Ok(dir) = cache_dir(&cfg).inspect_err(|e| eprintln!("z3cache: {e}")) else {
         return 1;
     };
     if !store_exists(dir) {
-        if json {
+        if view == StatsView::Json {
             println!(
                 "{{\"path\": {}, \"entries\": 0, \"bytes\": 0}}",
                 json_str(&dir.join(FILE_NAME).display().to_string())
@@ -222,7 +223,7 @@ fn stats(json: bool) -> i32 {
     };
     let t = totals(&rows);
     let bytes = store.file_bytes();
-    if json {
+    if view == StatsView::Json {
         println!(
             "{{\"path\": {}, \"entries\": {entries}, \"bytes\": {bytes}, \"today\": {}, \"last_7_days\": {}, \"all_time\": {}}}",
             json_str(&store.path().display().to_string()),
@@ -232,45 +233,168 @@ fn stats(json: bool) -> i32 {
         );
         return 0;
     }
+    print!(
+        "{}",
+        render_stats(
+            &store.path().display().to_string(),
+            entries,
+            bytes,
+            &t,
+            view == StatsView::All
+        )
+    );
+    0
+}
+
+/// How `z3cache stats` shows its numbers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatsView {
+    /// The main rows, plus any other row that is not zero.
+    Summary,
+    /// Every row.
+    All,
+    Json,
+}
+
+/// Rows of the `stats` table, in order: (counter or derived name, label).
+/// `hit_rate` is derived from `hits` and `misses`.
+const MAIN_ROWS: &[(&str, &str)] = &[
+    ("hit_rate", "hit rate"),
+    ("hits", "answered from cache"),
+    ("misses", "solved by Z3"),
+    ("saved_us", "solver time saved"),
+    ("sessions", "sessions"),
+    ("solver_starts", "solver starts"),
+    ("stores", "entries stored"),
+];
+
+/// Rows shown only when not zero (or with `--all`).
+const OPTIONAL_ROWS: &[(&str, &str)] = &[
+    ("lock_waits", "waited for another worktree"),
+    ("lock_hits", "answered after waiting"),
+    ("lock_timeouts", "gave up waiting, solved anyway"),
+    ("audits", "hits re-checked against Z3"),
+    ("audit_instabilities", "re-checks that came back unknown"),
+    ("audit_failures", "re-checks that could not run"),
+    ("gc_deleted", "entries evicted"),
+];
+
+/// Rows that indicate a problem; listed under "needs attention" when not
+/// zero.
+const PROBLEM_ROWS: &[(&str, &str)] = &[
+    ("replay_mismatches", "replay mismatches"),
+    ("errored_sessions", "sessions with solver errors"),
+    ("audit_contradictions", "re-checks contradicting cache"),
+    ("bypassed_sessions", "bypassed sessions"),
+];
+
+fn render_stats(path: &str, entries: u64, bytes: u64, t: &Totals, all: bool) -> String {
+    let periods = [&t.today, &t.week, &t.all];
+    let get = |m: &BTreeMap<String, i64>, name: &str| m.get(name).copied().unwrap_or(0);
+    let cell = |m: &BTreeMap<String, i64>, name: &str| match name {
+        "hit_rate" => {
+            let (h, s) = (get(m, "hits"), get(m, "misses"));
+            if h + s == 0 {
+                "-".to_string()
+            } else {
+                format!("{:.1}%", 100.0 * h as f64 / (h + s) as f64)
+            }
+        }
+        "saved_us" => duration(get(m, name)),
+        _ => thousands(get(m, name)),
+    };
+    let nonzero = |name: &str| periods.iter().any(|m| get(m, name) != 0);
+
     let mut o = String::new();
-    let _ = writeln!(o, "cache    {}", store.path().display());
-    let _ = writeln!(o, "entries  {entries}, {}", mb(bytes));
+    let _ = writeln!(o, "cache    {path}");
+    let _ = writeln!(o, "entries  {}, {}", thousands(entries as i64), mb(bytes));
     let _ = writeln!(
         o,
-        "\n{:<34} {:>12} {:>12} {:>12}",
+        "\n{:<32} {:>10} {:>10} {:>10}",
         "", "today", "7 days", "all time"
     );
-    let cell = |m: &BTreeMap<String, i64>, name: &str| {
-        let n = m.get(name).copied().unwrap_or(0);
-        if name == "saved_us" {
-            format!("{:.1} s", n as f64 / 1e6)
-        } else {
-            n.to_string()
-        }
-    };
-    let mut row = |label: &str, name: &str| {
+    let row = |o: &mut String, label: &str, name: &str| {
         let _ = writeln!(
             o,
-            "{label:<34} {:>12} {:>12} {:>12}",
+            "{label:<32} {:>10} {:>10} {:>10}",
             cell(&t.today, name),
             cell(&t.week, name),
             cell(&t.all, name)
         );
     };
-    for (name, label) in COUNTERS {
-        row(label, name);
+    for (name, label) in MAIN_ROWS {
+        row(&mut o, label, name);
     }
+    for (name, label) in OPTIONAL_ROWS {
+        if all || nonzero(name) {
+            row(&mut o, label, name);
+        }
+    }
+
     let reasons: Vec<String> = t
         .all
         .keys()
         .filter(|k| k.starts_with("bypass: "))
         .cloned()
         .collect();
-    for k in reasons {
-        row(&format!("  {}", k.trim_start_matches("bypass: ")), &k);
+    let problems: Vec<&(&str, &str)> = PROBLEM_ROWS
+        .iter()
+        .filter(|(name, _)| all || nonzero(name))
+        .collect();
+    let attention = PROBLEM_ROWS.iter().any(|(name, _)| nonzero(name));
+    if problems.is_empty() {
+        let _ = writeln!(
+            o,
+            "\nno bypassed sessions, solver errors or replay mismatches"
+        );
+    } else {
+        let heading = if attention {
+            "needs attention (see `z3cache doctor` and Z3CACHE_LOG)"
+        } else {
+            "problems"
+        };
+        let _ = writeln!(o, "\n{heading}");
+        for (name, label) in problems {
+            row(&mut o, label, name);
+            if *name == "bypassed_sessions" {
+                for k in &reasons {
+                    row(
+                        &mut o,
+                        &format!("  {}", k.trim_start_matches("bypass: ")),
+                        k,
+                    );
+                }
+            }
+        }
     }
-    print!("{o}");
-    0
+    o
+}
+
+/// `1234567` as `1,234,567`.
+fn thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
+/// Microseconds as `45.2 s`, `12m 29s` or `3h 05m`.
+fn duration(us: i64) -> String {
+    let s = us.max(0) as f64 / 1e6;
+    if s < 60.0 {
+        format!("{s:.1} s")
+    } else if s < 3600.0 {
+        let s = s.round() as i64;
+        format!("{}m {:02}s", s / 60, s % 60)
+    } else {
+        let m = (s / 60.0).round() as i64;
+        format!("{}h {:02}m", m / 60, m % 60)
+    }
 }
 
 fn clear() -> i32 {
@@ -566,4 +690,84 @@ fn round_trip(real: &Path) -> Result<String, String> {
     })();
     let _ = std::fs::remove_dir_all(&dir);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn totals_of(pairs: &[(&str, i64)]) -> Totals {
+        let m: BTreeMap<String, i64> = pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        Totals {
+            today: m.clone(),
+            week: m.clone(),
+            all: m,
+        }
+    }
+
+    #[test]
+    fn numbers_and_durations() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(19_741), "19,741");
+        assert_eq!(thousands(1_234_567), "1,234,567");
+        assert_eq!(duration(45_200_000), "45.2 s");
+        assert_eq!(duration(748_600_000), "12m 29s");
+        assert_eq!(duration(11_100_000_000), "3h 05m");
+    }
+
+    #[test]
+    fn every_counter_has_a_row() {
+        for (name, _) in COUNTERS {
+            let shown = [MAIN_ROWS, OPTIONAL_ROWS, PROBLEM_ROWS]
+                .iter()
+                .any(|rows| rows.iter().any(|(n, _)| n == name));
+            assert!(shown, "counter {name} is not in any stats row");
+        }
+        for (_, label) in MAIN_ROWS.iter().chain(OPTIONAL_ROWS).chain(PROBLEM_ROWS) {
+            assert!(
+                label.len() <= 32,
+                "label {label:?} is wider than the column"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_shows_hit_rate_and_hides_zero_rows() {
+        let t = totals_of(&[("hits", 3), ("misses", 1), ("sessions", 2)]);
+        let text = render_stats("/c", 5, 1000, &t, false);
+        assert!(text.contains("hit rate"), "{text}");
+        assert!(text.contains("75.0%"), "{text}");
+        assert!(!text.contains("waited for another worktree"), "{text}");
+        assert!(
+            text.contains("no bypassed sessions, solver errors or replay mismatches"),
+            "{text}"
+        );
+        let all = render_stats("/c", 5, 1000, &t, true);
+        assert!(all.contains("waited for another worktree"), "{all}");
+        assert!(all.contains("\nproblems\n"), "{all}");
+        assert!(!all.contains("needs attention"), "{all}");
+    }
+
+    #[test]
+    fn problems_are_listed_with_bypass_reasons() {
+        let t = totals_of(&[
+            ("hits", 1),
+            ("bypassed_sessions", 2),
+            ("bypass: command reset", 2),
+        ]);
+        let text = render_stats("/c", 1, 1000, &t, false);
+        assert!(text.contains("needs attention"), "{text}");
+        assert!(text.contains("bypassed sessions"), "{text}");
+        assert!(text.contains("  command reset"), "{text}");
+        assert!(!text.contains("replay mismatches"), "{text}");
+    }
+
+    #[test]
+    fn no_queries_shows_no_hit_rate() {
+        let text = render_stats("/c", 0, 0, &totals_of(&[]), false);
+        let line = text.lines().find(|l| l.starts_with("hit rate")).unwrap();
+        assert!(line.trim_end().ends_with('-'), "{line}");
+    }
 }
