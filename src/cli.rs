@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use crate::analyze;
-use crate::config::{Config, find_real_solver};
+use crate::config::{Config, FileStatus, Source, find_real_solver};
 use crate::lock;
 use crate::profile::Z3;
 use crate::solver::hash_executable;
@@ -30,7 +30,7 @@ const USAGE: &str = "\
 usage:
   z3cache stats [--json]            what the cache has answered, and its size
   z3cache clear                     delete every cached entry
-  z3cache gc                        evict to Z3CACHE_MAX_SIZE and remove stale lock files
+  z3cache gc                        evict to max_size and remove stale lock files
   z3cache doctor                    check the real solver, the cache directory, and one query
   z3cache analyze <record-dir>...   report on sessions recorded with Z3CACHE_RECORD
   z3cache help                      show this message
@@ -90,7 +90,7 @@ fn analyze_cmd(dirs: &[OsString]) -> i32 {
 fn cache_dir(cfg: &Config) -> Result<&Path, String> {
     cfg.dir
         .as_deref()
-        .ok_or_else(|| "no cache directory: set Z3CACHE_DIR".to_string())
+        .ok_or_else(|| format!("no cache directory: {}", cfg.how_to_set("dir")))
 }
 
 fn store_exists(dir: &Path) -> bool {
@@ -189,7 +189,7 @@ fn json_period(m: &BTreeMap<String, i64>) -> String {
 }
 
 fn stats(json: bool) -> i32 {
-    let cfg = Config::from_env();
+    let cfg = Config::load();
     let Ok(dir) = cache_dir(&cfg).inspect_err(|e| eprintln!("z3cache: {e}")) else {
         return 1;
     };
@@ -274,7 +274,7 @@ fn stats(json: bool) -> i32 {
 }
 
 fn clear() -> i32 {
-    let cfg = Config::from_env();
+    let cfg = Config::load();
     let mut store = match open_store(&cfg) {
         Ok(s) => s,
         Err(e) => {
@@ -306,7 +306,7 @@ fn mb(bytes: u64) -> String {
 }
 
 fn gc() -> i32 {
-    let cfg = Config::from_env();
+    let cfg = Config::load();
     for w in &cfg.warnings {
         eprintln!("z3cache: {w}");
     }
@@ -331,8 +331,9 @@ fn gc() -> i32 {
     let cap = cfg.max_size;
     println!("cache    {}", store.path().display());
     println!(
-        "cap      {} (Z3CACHE_MAX_SIZE); eviction goes down to 80%",
-        mb(cap)
+        "cap      {} (max_size, {}); eviction goes down to 80%",
+        mb(cap),
+        source_text(&cfg, "max_size")
     );
     let deleted = match store.evict(cap) {
         Ok(e) if e.deleted == 0 => {
@@ -374,18 +375,32 @@ fn gc() -> i32 {
 }
 
 fn doctor() -> i32 {
-    let cfg = Config::from_env();
+    let cfg = Config::load();
     let mut ok = true;
     for w in &cfg.warnings {
         println!("warning       {w}");
     }
+    match (&cfg.file.path, &cfg.file.status) {
+        (None, _) => println!("config file   none (HOME is unset)"),
+        (Some(p), FileStatus::Found) => println!("config file   {} (found)", p.display()),
+        (Some(p), FileStatus::Missing) => println!("config file   {} (not found)", p.display()),
+        (Some(p), FileStatus::Unreadable(e)) => {
+            println!("config file   {} (UNREADABLE: {e}; ignored)", p.display())
+        }
+    }
+    for s in &cfg.settings {
+        println!(
+            "setting       {} = {} ({})",
+            s.key,
+            s.value,
+            source_text(&cfg, s.key)
+        );
+    }
     let real = match find_real_solver(&cfg, &Z3) {
         Ok(p) => {
-            let how = if cfg.real_z3.is_some() {
-                "Z3CACHE_REAL_Z3"
-            } else {
-                "first z3 on PATH that is not z3cache"
-            };
+            let how = cfg
+                .origin("real_z3")
+                .unwrap_or_else(|| "first z3 on PATH that is not z3cache".into());
             println!("real solver   {} (from {how})", p.display());
             Some(p)
         }
@@ -399,7 +414,7 @@ fn doctor() -> i32 {
     let mut store = None;
     match &cfg.dir {
         None => {
-            println!("cache dir     NONE: set Z3CACHE_DIR");
+            println!("cache dir     NONE: {}", cfg.how_to_set("dir"));
             ok = false;
         }
         Some(dir) => match check_writable(dir) {
@@ -468,6 +483,15 @@ fn doctor() -> i32 {
     if ok { 0 } else { 1 }
 }
 
+/// Where a setting came from, for `doctor` and `gc`.
+fn source_text(cfg: &Config, key: &str) -> String {
+    match cfg.source(key) {
+        Source::Env => format!("environment, {}", crate::config::env_name(key)),
+        Source::File(n) => format!("config file, line {n}"),
+        Source::Default => "default".into(),
+    }
+}
+
 fn check_writable(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let probe = dir.join(format!(".doctor-{}", std::process::id()));
@@ -488,6 +512,9 @@ fn round_trip(real: &Path) -> Result<String, String> {
             .args(["-smt2", "-in"])
             .env("Z3CACHE_DIR", &dir)
             .env("Z3CACHE_REAL_Z3", real)
+            // The user's config file does not apply to this self-test: its
+            // mode or recording would defeat or pollute it.
+            .env("Z3CACHE_CONFIG", dir.join("no-config"))
             .env_remove("Z3CACHE_MODE")
             .env_remove("Z3CACHE_RECORD")
             .stdin(Stdio::piped())

@@ -7,6 +7,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 
 use super::{Entry, Eviction, Key, Result, SolverInfo, SolverStamp, Store, StoreError, day, now_s};
 
+/// How long session-end bookkeeping waits for other writers.
+const FINISH_BUSY_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub const FILE_NAME: &str = "cache-v1.sqlite3";
 
 /// `PRAGMA user_version` of the current schema. A file with another version
@@ -205,6 +208,10 @@ impl Store for SqliteStore {
         }
         let now = now_s();
         let today = day(now);
+        // Session-end bookkeeping runs after every answer has been given, so
+        // waiting longer for other writers costs nothing but a later exit,
+        // while giving up drops the session's counters.
+        self.conn.busy_timeout(FINISH_BUSY_TIMEOUT)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

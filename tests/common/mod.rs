@@ -57,9 +57,18 @@ impl Run {
     }
 }
 
+/// A config file path that never exists. Tests use it as `Z3CACHE_CONFIG`
+/// so that they never read the user's config file.
+pub fn no_config() -> PathBuf {
+    std::env::temp_dir()
+        .join(format!("z3cache-test-{}-no-config", std::process::id()))
+        .join("config")
+}
+
 /// A command running `bin` with `args`, stdin and stdout piped, all
 /// `Z3CACHE_*` and `Z3STUB_*` variables cleared and `env` set. Unless `env`
-/// sets `Z3CACHE_DIR`, it gets a fresh, empty cache.
+/// sets `Z3CACHE_DIR`, it gets a fresh, empty cache; unless it sets
+/// `Z3CACHE_CONFIG`, no config file.
 pub fn proxy_command(bin: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Command {
     let mut cmd = Command::new(bin);
     cmd.args(args)
@@ -75,6 +84,10 @@ pub fn proxy_command(bin: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Comma
     // Never touch the user's cache: a fresh one per run unless given.
     if !env.iter().any(|(k, _)| *k == "Z3CACHE_DIR") {
         cmd.env("Z3CACHE_DIR", temp_dir("cache"));
+    }
+    // Never read the user's config file.
+    if !env.iter().any(|(k, _)| *k == "Z3CACHE_CONFIG") {
+        cmd.env("Z3CACHE_CONFIG", no_config());
     }
     for (k, v) in env {
         cmd.env(k, v);

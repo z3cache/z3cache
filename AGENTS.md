@@ -92,7 +92,9 @@ and its Z3; a skipped tier fails CI.
 
 `cargo test` builds the stub solver (`examples/stub_solver.rs`); a single
 `cargo test --test proxy` does not, so run `cargo build --examples` first.
-Tests use temporary cache directories and never touch the user's cache.
+Tests use temporary cache directories and never touch the user's cache, and
+set `Z3CACHE_CONFIG` to a path that does not exist so that they never read
+the user's config file (`tests/common/mod.rs` does both).
 Without `Z3CACHE_REAL_Z3` (or a `z3` on `PATH`) and `Z3CACHE_VERUS`, the
 differential, random and e2e tests print `SKIPPED` and pass.
 

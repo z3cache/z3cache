@@ -46,9 +46,12 @@ one as the real solver.
 # Install
 cargo install --git https://github.com/z3cache/z3cache
 
-# Point Verus at z3cache, and z3cache at the z3 that ships with Verus
+# Point z3cache at the z3 that ships with Verus
+mkdir -p ~/.config/z3cache
+echo 'real_z3 = /path/to/verus/z3' >> ~/.config/z3cache/config
+
+# Point Verus at z3cache
 export VERUS_Z3_PATH="$HOME/.cargo/bin/z3cache"
-export Z3CACHE_REAL_Z3="/path/to/verus/z3"
 
 # Check the setup: finds Z3, checks the cache, runs one query cold and warm
 z3cache doctor
@@ -60,13 +63,14 @@ verus src/lib.rs
 z3cache stats
 ```
 
-To use the cache in every worktree, put the two `export` lines in your shell
+To use the cache in every worktree, put the `export` line in your shell
 profile. To turn it off for one run, set `Z3CACHE_MODE=off`.
 
 ### Or: a one-line alias
 
-If the Verus release directory is on your `PATH`, z3cache finds the `z3` next
-to `verus` by itself, and one alias in `~/.zshrc` or `~/.bashrc` is enough:
+With `real_z3` in the config file, or the Verus release directory on your
+`PATH` (z3cache then finds the `z3` next to `verus` by itself), one alias in
+`~/.zshrc` or `~/.bashrc` can replace the `export` line:
 
 ```sh
 alias verus='VERUS_Z3_PATH="$HOME/.cargo/bin/z3cache" verus'
@@ -74,7 +78,7 @@ alias verus='VERUS_Z3_PATH="$HOME/.cargo/bin/z3cache" verus'
 
 Aliases only apply to commands you type in an interactive shell. If your
 project runs Verus from a script, a Makefile or `cargo verus`, use the
-`export` lines above instead. To bypass the alias for one run, type
+`export` line above instead. To bypass the alias for one run, type
 `command verus`.
 
 ## Is it safe?
@@ -96,24 +100,44 @@ Two things to keep in mind:
 
 ## Configuration
 
-Everything is set through environment variables, because the command line
-belongs to Z3.
+Settings live in `~/.config/z3cache/config` (on macOS too), one
+`key = value` per line:
 
-| Variable | What it does | Default |
-|---|---|---|
-| `Z3CACHE_REAL_Z3` | Path to the real Z3 | the first other `z3` on `PATH` |
-| `Z3CACHE_DIR` | Cache directory | `~/Library/Caches/z3cache` (macOS), `~/.cache/z3cache` (Linux) |
-| `Z3CACHE_MODE` | `rw` read and write; `ro` read only; `enforce` fail on any miss; `off` plain Z3 | `rw` |
-| `Z3CACHE_STORE` | `unsat` stores only successful proofs; `all` also stores failures | `unsat` |
-| `Z3CACHE_SOLVER` | `keep` one solver per session; `fresh` a clean solver for every miss | `keep` |
-| `Z3CACHE_MAX_SIZE` | Size cap, such as `2G` or `500M` | `2G` |
-| `Z3CACHE_VERIFY` | Fraction of hits to re-check against Z3 | `0` |
-| `Z3CACHE_LOCK_WAIT` | Seconds to wait for another process solving the same query | `60` |
-| `Z3CACHE_LOG` | File for diagnostics | none |
-| `Z3CACHE_RECORD` | Directory to record sessions for `z3cache analyze` | none |
+```
+# ~/.config/z3cache/config
+real_z3 = ~/verus/z3
+dir = ~/caches/z3cache
+max_size = 10G
+```
 
-An invalid value is never fatal: z3cache logs a warning and uses the default.
-Every variable is described in [docs/DESIGN.md](docs/DESIGN.md), section 11.
+Lines starting with `#` are comments, a value may be wrapped in double
+quotes, and a path may start with `~/`. The file is
+`$XDG_CONFIG_HOME/z3cache/config` if you set `XDG_CONFIG_HOME`, and
+`Z3CACHE_CONFIG` names another file. Without a file, every setting has its
+default.
+
+Each setting can also be given as an environment variable, which overrides
+the file: `Z3CACHE_` followed by the key in upper case, such as
+`Z3CACHE_MODE=off` for one run. There are no command-line flags, because the
+command line belongs to Z3.
+
+| Key | Variable | What it does | Default |
+|---|---|---|---|
+| `real_z3` | `Z3CACHE_REAL_Z3` | Path to the real Z3 | the first other `z3` on `PATH` |
+| `dir` | `Z3CACHE_DIR` | Cache directory | `~/Library/Caches/z3cache` (macOS), `~/.cache/z3cache` (Linux) |
+| `mode` | `Z3CACHE_MODE` | `rw` read and write; `ro` read only; `enforce` fail on any miss; `off` plain Z3 | `rw` |
+| `store` | `Z3CACHE_STORE` | `unsat` stores only successful proofs; `all` also stores failures | `unsat` |
+| `solver` | `Z3CACHE_SOLVER` | `keep` one solver per session; `fresh` a clean solver for every miss | `keep` |
+| `max_size` | `Z3CACHE_MAX_SIZE` | Size cap, such as `2G` or `500M` | `2G` |
+| `verify` | `Z3CACHE_VERIFY` | Fraction of hits to re-check against Z3 | `0` |
+| `lock_wait` | `Z3CACHE_LOCK_WAIT` | Seconds to wait for another process solving the same query | `60` |
+| `log` | `Z3CACHE_LOG` | File for diagnostics | none |
+| `record` | `Z3CACHE_RECORD` | Directory to record sessions for `z3cache analyze` | none |
+
+A bad line or an invalid value is never fatal: z3cache logs a warning and
+falls back to the file's value, then the default. `z3cache doctor` shows
+each setting's value and where it came from. Every setting is described in
+[docs/DESIGN.md](docs/DESIGN.md), section 11.
 
 ## Commands
 
@@ -121,7 +145,7 @@ Every variable is described in [docs/DESIGN.md](docs/DESIGN.md), section 11.
 |---|---|
 | `z3cache stats [--json]` | Hits, misses, solver time saved, cache size |
 | `z3cache doctor` | Check the setup end to end |
-| `z3cache gc` | Shrink the cache to `Z3CACHE_MAX_SIZE` (also runs automatically) |
+| `z3cache gc` | Shrink the cache to `max_size` (also runs automatically) |
 | `z3cache clear` | Delete every cached answer |
 | `z3cache analyze <dir>…` | Compare recorded runs and estimate what a cache would save |
 
@@ -132,10 +156,10 @@ to the real Z3.
 ## Troubleshooting
 
 - **No speedup:** run `z3cache stats`. Bypassed sessions list the command or
-  option that z3cache does not cache; those sessions run plain Z3. Set
-  `Z3CACHE_LOG` for details.
-- **"no real z3 found on PATH":** set `Z3CACHE_REAL_Z3` to the `z3` that ships
-  with your Verus.
+  option that z3cache does not cache; those sessions run plain Z3. Set `log`
+  in the config file for details.
+- **"no real z3 found on PATH":** set `real_z3` in the config file to the `z3`
+  that ships with your Verus.
 - **Starting over:** run `z3cache clear`, or delete the cache directory. The
   cache only ever saves time, so nothing is lost.
 

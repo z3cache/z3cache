@@ -132,7 +132,7 @@ impl Verus {
     }
 
     /// Runs Verus in its own process group, with every `Z3CACHE_*` variable
-    /// cleared and `env` set. Waits for stderr to close as well as for
+    /// cleared, no config file, and `env` set. Waits for stderr to close as well as for
     /// Verus to exit: the solvers inherit stderr, so this also waits for
     /// every z3cache process to finish its bookkeeping.
     fn run(&self, dir: &Path, file: &str, args: &[&str], env: &[(&str, &OsStr)]) -> Outcome {
@@ -151,6 +151,7 @@ impl Verus {
             }
         }
         cmd.env_remove("VERUS_Z3_PATH");
+        cmd.env("Z3CACHE_CONFIG", no_config());
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -233,6 +234,7 @@ fn stats(cache: &Path) -> Stats {
     let out = cmd
         .args(["stats", "--json"])
         .env("Z3CACHE_DIR", cache)
+        .env("Z3CACHE_CONFIG", no_config())
         .output()
         .unwrap();
     assert!(out.status.success(), "z3cache stats failed");

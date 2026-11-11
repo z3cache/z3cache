@@ -96,11 +96,11 @@ Terms:
 | Arguments are `-smt2`, `-in` and `name=value` parameters whose names are on the option allowlist (section 5) | Proxy |
 | Any other arguments (`--version`, a file name, `-st`, `-t:` …) | `exec` the real Z3 with the same arguments |
 | Invoked as `z3cache` with a subcommand | Command-line tool (section 12) |
-| `Z3CACHE_MODE=off` | `exec` the real Z3 |
+| Mode `off` (section 11) | `exec` the real Z3 |
 
 Invoked as `z3` (a symlink), z3cache never treats its arguments as a
-subcommand. The real Z3 is `Z3CACHE_REAL_Z3`, or else the first `z3` on
-`PATH` that is not z3cache itself.
+subcommand. The real Z3 is the `real_z3` setting (`Z3CACHE_REAL_Z3`), or else
+the first `z3` on `PATH` that is not z3cache itself.
 
 ## 5. Command handling
 
@@ -383,26 +383,70 @@ Counters `lock_waits`, `lock_hits` and `lock_timeouts` record waiting.
 
 ## 11. Configuration
 
-All configuration is by environment variable, because the command line
-belongs to Z3.
+The command line belongs to Z3, so settings come from environment variables
+and a config file. For each setting, a non-empty environment variable wins
+over the config file, and the config file wins over the default. An empty
+variable counts as unset.
 
-| Variable | Values | Default |
-|---|---|---|
-| `Z3CACHE_REAL_Z3` | Path to the real Z3 | First other `z3` on `PATH` |
-| `Z3CACHE_DIR` | Cache directory | Platform cache directory |
-| `Z3CACHE_MODE` | `rw`, `ro`, `enforce`, `off` | `rw` |
-| `Z3CACHE_STORE` | `unsat`, `all` | `unsat` |
-| `Z3CACHE_SOLVER` | `keep`, `fresh` | `keep` |
-| `Z3CACHE_MAX_SIZE` | Size such as `2G`, `500M` | `2G` |
-| `Z3CACHE_VERIFY` | Fraction of query hits to audit, 0–1 | 0 |
-| `Z3CACHE_GC_EVERY` | One session in this many checks the size at exit; `0` never | 100 |
-| `Z3CACHE_LOCK_WAIT` | Longest wait for another session's answer, seconds | 60 |
-| `Z3CACHE_RECORD` | Directory for transcripts and per-query records | Unset |
-| `Z3CACHE_LOG` | Diagnostic log file | Unset |
-| `Z3CACHE_SOLVER_SALT` | Extra bytes mixed into `solver_id` | Empty |
+| Variable | File key | Values | Default |
+|---|---|---|---|
+| `Z3CACHE_REAL_Z3` | `real_z3` | Path to the real Z3 | First other `z3` on `PATH` |
+| `Z3CACHE_DIR` | `dir` | Cache directory | Platform cache directory |
+| `Z3CACHE_MODE` | `mode` | `rw`, `ro`, `enforce`, `off` | `rw` |
+| `Z3CACHE_STORE` | `store` | `unsat`, `all` | `unsat` |
+| `Z3CACHE_SOLVER` | `solver` | `keep`, `fresh` | `keep` |
+| `Z3CACHE_MAX_SIZE` | `max_size` | Size such as `2G`, `500M` | `2G` |
+| `Z3CACHE_VERIFY` | `verify` | Fraction of query hits to audit, 0–1 | 0 |
+| `Z3CACHE_GC_EVERY` | `gc_every` | One session in this many checks the size at exit; `0` never | 100 |
+| `Z3CACHE_LOCK_WAIT` | `lock_wait` | Longest wait for another session's answer, seconds | 60 |
+| `Z3CACHE_RECORD` | `record` | Directory for transcripts and per-query records | Unset |
+| `Z3CACHE_LOG` | `log` | Diagnostic log file | Unset |
+| `Z3CACHE_SOLVER_SALT` | `solver_salt` | Extra bytes mixed into `solver_id` | Empty |
+| `Z3CACHE_CONFIG` | none | Config file path | See below |
 
-An invalid value is never an error: z3cache logs a warning and uses the
-default.
+**Config file.** The file is `$Z3CACHE_CONFIG` if that is set and non-empty;
+otherwise `$XDG_CONFIG_HOME/z3cache/config`, or `~/.config/z3cache/config`
+when `XDG_CONFIG_HOME` is unset, on every platform. `Z3CACHE_CONFIG` can only
+be set in the environment. A missing file is normal and silent. Every
+invocation reads it: the proxy, the decision to `exec` the real Z3 (section
+4), and the command-line tools (section 12).
+
+The file is UTF-8 text, one `key = value` per line:
+
+```
+# ~/.config/z3cache/config
+real_z3 = ~/verus/z3
+dir = "/var/cache/z3cache"
+max_size = 10G
+```
+
+- A key is the variable name without `Z3CACHE_`, in lower case, as in the
+  table. Keys are case-sensitive.
+- Blank lines, and lines whose first non-blank character is `#`, are
+  ignored. There are no comments after a value.
+- Whitespace around the key and the value is trimmed. A value wrapped in
+  double quotes loses them, and keeps any whitespace inside; there are no
+  escapes.
+- In `real_z3`, `dir`, `log` and `record`, a leading `~/` stands for `$HOME`.
+- A key with an empty value is unset, as an empty variable is.
+
+**Nothing in the configuration is an error** (rule 2). Each problem is a
+warning, logged once the log is open (`doctor` and `gc` print them), and the
+setting falls back to the next source:
+
+- a config file that exists but cannot be read, is not a regular file (a
+  FIFO or a terminal could block every solver start) or is larger than
+  1 MiB is ignored as a whole;
+- a line that is not UTF-8, has no `=`, or has an unknown key is ignored,
+  with the file name and line number;
+- a key given twice takes the last value, with a warning;
+- an invalid value is checked by the same parser as the variable: an invalid
+  variable falls back to the file's value, and an invalid file value to the
+  default.
+
+`z3cache doctor` shows the config file and whether it was found, then each
+setting's effective value and its source: environment, config file (with the
+line), or default.
 
 Modes:
 
@@ -421,8 +465,10 @@ Modes:
 - `z3cache gc`: evict to the size cap and remove idle lock files, then report
   what was done.
 - `z3cache clear`: delete all entries.
-- `z3cache doctor`: locate the real Z3, show its identity, check the cache
-  directory, and run one small query cold and warm.
+- `z3cache doctor`: show the config file and every setting with its source
+  (section 11), locate the real Z3, show its identity, check the cache
+  directory, and run one small query cold and warm. The query runs against a
+  temporary cache and without the config file.
 - `z3cache analyze <record-dir>…`: compare recorded runs (see below).
 
 **Recording.** With `Z3CACHE_RECORD=<dir>`, each session saves its input and
@@ -549,7 +595,8 @@ entries apart in one store.
 ## 18. Testing
 
 1. **Unit:** the command splitter (strings, quoted symbols, comments, commands
-   split across reads), state hashing, classification, statistics, the store.
+   split across reads), state hashing, classification, statistics, the store,
+   the config file parser and the precedence of settings.
    Property tests run fixed seeds: generated commands, written with random
    whitespace and comments, split the same at any chunk boundaries; raw bytes
    and the remainder reproduce the input; the canonical form is a fixed point
@@ -558,8 +605,8 @@ entries apart in one store.
    changing one in a popped frame does not.
 2. **Stub solver** (`examples/stub_solver.rs`): a scripted stand-in for Z3
    that answers from a script and logs its launches. Covers lazy start,
-   replay order, `pop` handling, bypass, policies, modes, and "a warm run
-   starts no solver".
+   replay order, `pop` handling, bypass, policies, modes, the config file,
+   and "a warm run starts no solver".
 3. **Differential:** a corpus of transcripts run through real Z3, the proxy
    cold and the proxy warm, under each store policy and solver lifetime.
    Output must match apart from statistics and error positions. The corpus
@@ -598,7 +645,9 @@ entries apart in one store.
    the module's keys.
 
 Tiers 3 and 5 need a real Z3 or Verus and skip with a message when none is
-configured.
+configured. Every test runs z3cache with `Z3CACHE_CONFIG` set to a path that
+does not exist, unless it writes its own config file, so the user's config
+file is never read.
 
 ## 19. Prior art
 

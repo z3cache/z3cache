@@ -22,7 +22,7 @@ fn main() {
         exit(cli::run(args));
     }
 
-    let cfg = Config::from_env();
+    let cfg = Config::load();
     log::init(cfg.log.as_deref());
     for w in &cfg.warnings {
         log!("{w}");

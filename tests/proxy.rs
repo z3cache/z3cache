@@ -1506,3 +1506,184 @@ fn error_shaped_echo_is_data() {
         out.text()
     );
 }
+
+/// Writes `text` as a config file in a fresh directory.
+fn config_file(name: &str, text: &[u8]) -> PathBuf {
+    let p = temp_dir(name).join("config");
+    std::fs::write(&p, text).unwrap();
+    p
+}
+
+#[test]
+fn config_file_sets_the_cache_dir_and_the_solver() {
+    let f = Fixture::new("config-dir");
+    let config = config_file(
+        "config-dir-file",
+        format!(
+            "# z3cache\n\n  real_z3 = \"{}\"\ndir   =   {}  \n",
+            f.stub.display(),
+            f.cache.display()
+        )
+        .as_bytes(),
+    );
+    // An empty variable falls through to the file.
+    let env = [
+        ("Z3CACHE_CONFIG", config.as_os_str()),
+        ("Z3CACHE_DIR", OsStr::new("")),
+        ("Z3STUB_LOG", f.log.as_os_str()),
+    ];
+    let input = b"(assert a)\n(check-sat)\n";
+    for _ in 0..2 {
+        let out = run(&z3cache(), PROXY_ARGS, input, &env);
+        assert_eq!((out.text().as_str(), out.code), ("unsat\n", 0));
+    }
+    assert_eq!(f.launches(), 1);
+    assert_eq!(f.counter("hits"), 1);
+    // So do the command-line tools.
+    let stats = run(&z3cache(), &["stats"], b"", &env[..2]);
+    assert_eq!(stats.code, 0);
+    let want = format!("cache    {}", f.cache.join(FILE_NAME).display());
+    assert!(stats.text().starts_with(&want), "{}", stats.text());
+    let cleared = run(&z3cache(), &["clear"], b"", &env[..2]);
+    assert!(
+        cleared.text().starts_with("deleted 1 entries"),
+        "{}",
+        cleared.text()
+    );
+}
+
+#[test]
+fn config_file_mode_off_execs_the_real_solver() {
+    let f = Fixture::new("config-off");
+    let config = config_file("config-off-file", b"mode = off\n");
+    let out = f.run_env(b"(check-sat)", &[("Z3CACHE_CONFIG", config.as_os_str())]);
+    assert_eq!((out.text().as_str(), out.code), ("unsat\n", 0));
+    let log = std::fs::read_to_string(&f.log).unwrap();
+    assert!(!log.contains("z3cache-sentinel"), "{log}");
+    assert!(!f.cache.exists(), "off mode must not create a cache");
+}
+
+#[test]
+fn environment_overrides_the_config_file() {
+    let f = Fixture::new("config-env");
+    let other = temp_dir("config-env-other").join("cache");
+    let config = config_file(
+        "config-env-file",
+        format!("mode = off\ndir = {}\n", other.display()).as_bytes(),
+    );
+    let env = [
+        ("Z3CACHE_CONFIG", config.as_os_str()),
+        ("Z3CACHE_MODE", OsStr::new("rw")),
+    ];
+    let input = b"(assert a)\n(check-sat)\n";
+    f.run_env(input, &env);
+    let out = f.run_env(input, &env);
+    assert_eq!((out.text().as_str(), out.code), ("unsat\n", 0));
+    // Cached, in the directory from Z3CACHE_DIR rather than the file's.
+    assert_eq!(f.counter("hits"), 1);
+    assert_eq!(f.launches(), 1);
+    assert!(!other.exists());
+}
+
+#[test]
+fn a_bad_config_file_only_warns() {
+    let input = corpus("verus_like.smt2");
+    let answers = ("Z3STUB_ANSWERS", OsStr::new("unsat,sat,unsat"));
+    let direct = run(&stub(), PROXY_ARGS, &input, &[answers]);
+
+    // Line 1 would make every run read-only; line 7 restores rw.
+    let mut text = b"mode = ro\nnonsense\ncolour = blue\nmax_size = lots\n".to_vec();
+    text.extend_from_slice(b"mode = sometimes\nlog = \xff\xfe\nmode = rw\n");
+    let malformed = config_file("bad-config", &text);
+    let unreadable = temp_dir("bad-config-dir");
+    let fifo = temp_dir("bad-config-fifo").join("config");
+    let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: mkfifo(3) on a path we own.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+
+    let m = malformed.display();
+    let cases = [
+        (
+            &malformed,
+            vec![
+                format!("config file {m} line 2: expected `key = value`"),
+                format!("config file {m} line 3: unknown key \"colour\""),
+                format!("invalid max_size \"lots\" in {m} line 4; using 2G"),
+                format!("config file {m} line 6: not UTF-8"),
+                format!("config file {m} line 7: duplicate key \"mode\""),
+            ],
+        ),
+        (
+            &unreadable,
+            vec![format!("cannot read config file {}", unreadable.display())],
+        ),
+        (
+            &fifo,
+            vec![format!(
+                "cannot read config file {}: not a regular file",
+                fifo.display()
+            )],
+        ),
+    ];
+    for (config, warnings) in cases {
+        let f = Fixture::new("bad-config-run");
+        let log = f.log.parent().unwrap().join("z3cache.log");
+        // Cold, then warm: the warm run solves only the sat query again.
+        for stub_answers in ["unsat,sat,unsat", "sat"] {
+            let env = [
+                ("Z3STUB_ANSWERS", OsStr::new(stub_answers)),
+                ("Z3CACHE_CONFIG", config.as_os_str()),
+                ("Z3CACHE_LOG", log.as_os_str()),
+            ];
+            let limit = std::time::Duration::from_secs(60);
+            let out = run_bounded(&z3cache(), PROXY_ARGS, &input, &f.env(&env), limit);
+            assert_eq!(out.text(), direct.text(), "{}", config.display());
+            assert_eq!(out.code, direct.code);
+        }
+        assert_eq!(f.counter("hits"), 2, "{}", config.display());
+        let logged = std::fs::read_to_string(&log).unwrap();
+        for w in warnings {
+            assert!(logged.contains(&w), "{w}\n{logged}");
+        }
+    }
+}
+
+#[test]
+fn doctor_shows_the_config_file_and_sources() {
+    let f = Fixture::new("config-doctor");
+    let config = config_file("config-doctor-file", b"max_size = 500M\n# x\nmode = rw\n");
+    let env = [
+        ("Z3CACHE_CONFIG", config.as_os_str()),
+        ("Z3CACHE_DIR", f.cache.as_os_str()),
+        ("Z3CACHE_REAL_Z3", f.stub.as_os_str()),
+    ];
+    let doctor = run(&z3cache(), &["doctor"], b"", &env);
+    let text = doctor.text();
+    assert_eq!(doctor.code, 0, "{text}");
+    for line in [
+        format!("config file   {} (found)\n", config.display()),
+        "setting       max_size = 500M (config file, line 1)\n".into(),
+        "setting       mode = rw (config file, line 3)\n".into(),
+        format!(
+            "setting       dir = {} (environment, Z3CACHE_DIR)\n",
+            f.cache.display()
+        ),
+        "setting       verify = 0 (default)\n".into(),
+        "setting       log = none (default)\n".into(),
+        format!(
+            "real solver   {} (from Z3CACHE_REAL_Z3)\n",
+            f.stub.display()
+        ),
+    ] {
+        assert!(text.contains(&line), "{line}\n{text}");
+    }
+    assert!(text.contains("no solver started"), "{text}");
+    // Without a file.
+    let text = f.cli(&["doctor"]).text();
+    let want = format!("config file   {} (not found)\n", no_config().display());
+    assert!(text.contains(&want), "{text}");
+    assert!(
+        text.contains("setting       max_size = 2G (default)\n"),
+        "{text}"
+    );
+}
